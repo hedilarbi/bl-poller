@@ -389,6 +389,49 @@ def poll_user(user):
         if _p1_in_cooldown:
             return []
         if not token or not str(token).strip():
+            # No token at all — try auto-refresh before giving up.
+            _ar_key = (str(bot_id), int(telegram_id))
+            _auto_refresh = get_token_auto_refresh(str(bot_id), int(telegram_id))
+            if _auto_refresh and email and password:
+                _last = _ar_last_attempt.get(_ar_key, 0.0)
+                _now_t = time.time()
+                if _now_t - _last < _AR_MIN_INTERVAL_S:
+                    _p1_skip_until[_ar_key] = _last + _AR_MIN_INTERVAL_S
+                    return []
+                _poll_log(f"⚠️ [AUTO-REFRESH] [{bot_id}] No token — triggering Playwright login")
+                _ar_last_attempt[_ar_key] = _now_t
+                if not _playwright_lock.acquire(blocking=False):
+                    _poll_log(f"⏸ [AUTO-REFRESH] [{bot_id}] Playwright busy — will retry next cycle")
+                    _ar_last_attempt.pop(_ar_key, None)
+                    return []
+                try:
+                    ok, new_token, new_refresh, _ = get_playwright_p1_token(bot_id, telegram_id, email, password)
+                finally:
+                    _playwright_lock.release()
+                if ok and new_token:
+                    status_code2, results2 = get_offers_p1(new_token, headers=mobile_headers)
+                    if status_code2 == 200:
+                        save_playwright_p1_token(bot_id, telegram_id, new_token, new_refresh, mobile_headers)
+                        token = new_token
+                        _auto_refresh_fail_counts.pop(_ar_key, None)
+                        _ar_last_attempt.pop(_ar_key, None)
+                        _p1_skip_until.pop(_ar_key, None)
+                        set_token_status(bot_id, telegram_id, "valid")
+                        set_token_ok_mem(bot_id, telegram_id, cache_version)
+                        unpin_warning_if_any(bot_id, telegram_id, "expired")
+                        unpin_warning_if_any(bot_id, telegram_id, "no_token")
+                        bot_tok = _resolve_bot_token(bot_id, telegram_id)
+                        tg_send_message(bot_tok, telegram_id, "✅ <b>Token refreshed successfully</b> — bot is back online.")
+                        _log_offers_found("P1", telegram_id, results2 or [])
+                        return results2 or []
+                _ar_n = _auto_refresh_fail_counts.get(_ar_key, 0) + 1
+                _auto_refresh_fail_counts[_ar_key] = _ar_n
+                if _ar_n >= _AUTO_REFRESH_FAIL_THRESHOLD:
+                    set_token_auto_refresh(str(bot_id), int(telegram_id), False)
+                    _auto_refresh_fail_counts.pop(_ar_key, None)
+                    _poll_log(f"❌ [AUTO-REFRESH] [{bot_id}] Disabled after {_AUTO_REFRESH_FAIL_THRESHOLD} failures")
+                    _set_token_problem("no_token")
+                return []
             _set_token_problem("no_token")
             return []
         t0 = time.perf_counter()
