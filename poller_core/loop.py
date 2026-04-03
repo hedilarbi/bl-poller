@@ -932,7 +932,10 @@ def run():
         if cycle_idx % _HEARTBEAT_CYCLE_EVERY == 0:
             with _p2_global_lock:
                 _p2_remaining = max(0.0, _p2_global_blocked_until - time.time())
-            _poll_log(f"💓 heartbeat | cycle={cycle_idx} p2_backoff={_p2_remaining:.0f}s")
+            _now_hb = time.time()
+            _p1_max_skip = max((_v - _now_hb for _v in _p1_skip_until.values()), default=0.0)
+            _p1_status = f"cooldown {_p1_max_skip:.0f}s" if _p1_max_skip > 0 else "OK"
+            _poll_log(f"💓 heartbeat | cycle={cycle_idx} p1={_p1_status} p2_backoff={_p2_remaining:.0f}s")
         if OFFER_MEMORY_DEDUPE:
             maybe_reset_inmem_caches()
 
