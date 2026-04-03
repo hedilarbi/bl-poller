@@ -295,13 +295,10 @@ def poll_user(user):
     # has an invalid token, so offers on Athena are never silently missed.
     _p1_in_cooldown = False
     _p1_skip_key = (str(bot_id), int(telegram_id))
-    _poll_log(f"🔍 [P1-GATE] [{bot_id}] token={'SET' if token else 'EMPTY'} skip_until={_p1_skip_until.get(_p1_skip_key, 0.0):.0f} now={time.time():.0f} email={'SET' if email else 'MISSING'} pwd={'SET' if password else 'MISSING'}")
     if time.time() < _p1_skip_until.get(_p1_skip_key, 0.0):
         _p1_in_cooldown = True
-        _poll_log(f"🔍 [P1-GATE] [{bot_id}] → in skip-until cooldown")
     elif is_token_invalid(str(bot_id), int(telegram_id), token, int(cache_version)):
         _ar = get_token_auto_refresh(str(bot_id), int(telegram_id))
-        _poll_log(f"🔍 [P1-GATE] [{bot_id}] → token marked invalid, auto_refresh={_ar} email={'SET' if email else 'MISSING'} pwd={'SET' if password else 'MISSING'}")
         if _ar and email and password:
             # Auto-refresh is ON: clear invalid mark so the next 403 triggers Playwright.
             clear_token_invalid(str(bot_id), int(telegram_id))
@@ -389,14 +386,13 @@ def poll_user(user):
 
     def _fetch_p1_offers_real():
         nonlocal token, mobile_headers
-        _poll_log(f"🔍 [P1-FETCH] [{bot_id}] enter: cooldown={_p1_in_cooldown} token={'SET' if token else 'EMPTY'} email={'SET' if email else 'MISSING'} pwd={'SET' if password else 'MISSING'}")
         if _p1_in_cooldown:
             return []
         if not token or not str(token).strip():
             # No token at all — try auto-refresh before giving up.
             _ar_key = (str(bot_id), int(telegram_id))
             _auto_refresh = get_token_auto_refresh(str(bot_id), int(telegram_id))
-            _poll_log(f"🔍 [P1-FETCH] [{bot_id}] no token path: auto_refresh={_auto_refresh} email={'SET' if email else 'MISSING'} pwd={'SET' if password else 'MISSING'}")
+            _poll_log(f"🔍 [P1] [{bot_id}] no token: auto_refresh={_auto_refresh} email={'SET' if email else 'MISSING'} pwd={'SET' if password else 'MISSING'}")
             if _auto_refresh and email and password:
                 _last = _ar_last_attempt.get(_ar_key, 0.0)
                 _now_t = time.time()
@@ -542,6 +538,7 @@ def poll_user(user):
                 unpin_warning_if_any(bot_id, telegram_id, "no_token")
                 set_token_ok_mem(bot_id, telegram_id, cache_version)
             offers = results or []
+            _poll_log(f"✅ P1 [{bot_id}] 200 OK ({len(offers)} offers)")
             _log_offers_found("P1", telegram_id, offers)
             return offers
         if status_code is None:
