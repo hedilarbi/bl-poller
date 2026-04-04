@@ -257,7 +257,12 @@ def _on_reserve_done(future: concurrent.futures.Future, cand: dict):
     rs = rr.get("status_code")
     rb = rr.get("body")
     reserve_ok = 200 <= (rs or 0) < 300
-    observe_ms("reserve_rtt_ms", rr.get("latency_ms"))
+    _lat = rr.get("latency_ms")
+    observe_ms("reserve_rtt_ms", _lat)
+    _builtins.print(
+        f"[{datetime.now()}] {'✅' if reserve_ok else '❌'} [{platform.upper()}] Reserve {oid} → "
+        f"HTTP {rs} | {int(_lat or 0)}ms | {'OK' if reserve_ok else str(rb)}"
+    )
 
     if not reserve_ok:
         if platform == "p1" and rs == 401:
@@ -693,6 +698,16 @@ def _process_offers_for_user(
         filter_t0 = time.perf_counter()
         oid = offer.get("id")
         platform = offer.get("_platform", "p1")
+        rid0 = (offer.get("rides") or [{}])[0]
+        _price_disp = f"{offer.get('price')} {offer.get('currency','')}"
+        _pu_disp = _extract_addr(rid0.get("pickUpLocation")) or "?"
+        _do_disp = _extract_addr(rid0.get("dropOffLocation")) if rid0.get("dropOffLocation") else "?"
+        _poll_age_ms = int((time.time() - float(offer["_poll_ts"])) * 1000) if offer.get("_poll_ts") else "?"
+        _builtins.print(
+            f"[{datetime.now()}] 🔔 [{platform.upper()}] Offer {oid} | {_price_disp} | "
+            f"class={offer.get('vehicleClass','?')} | poll_age={_poll_age_ms}ms | "
+            f"PU={_pu_disp!r} DO={_do_disp!r}"
+        )
         # Skip offers currently being reserved (fire-and-forget in flight)
         if oid and is_pending_reserve(f"{platform}:{oid}"):
             continue
@@ -965,7 +980,16 @@ def _process_offers_for_user(
 
         is_rejected = bool(failed_filters) and not accept_override
         reason_for_log = forced_accept_reason or base_reason
-        observe_ms("offer_filter_ms", (time.perf_counter() - filter_t0) * 1000.0)
+        _filter_ms = (time.perf_counter() - filter_t0) * 1000.0
+        observe_ms("offer_filter_ms", _filter_ms)
+        _filter_summary = " | ".join(
+            f"{'✅' if fr['ok'] else '❌'} {fr['name']}" + (f": {fr['detail']}" if fr.get('detail') else "")
+            for fr in filter_results
+        )
+        _verdict = "⛔ REJECTED" if is_rejected else "✅ PASSED"
+        _builtins.print(
+            f"[{datetime.now()}] {_verdict} [{platform.upper()}] {oid} ({_filter_ms:.0f}ms) → {_filter_summary or 'no filters'}"
+        )
 
         if is_rejected:
             print(f"[{datetime.now()}] ⛔ Rejected {oid} – {base_reason or 'filtres non respectés'}")
@@ -1070,6 +1094,9 @@ def _process_offers_for_user(
                     )
 
         if reserve_future is not None:
+            _builtins.print(
+                f"[{datetime.now()}] 🚀 [{platform.upper()}] Reserving {oid} | {_price_disp}"
+            )
             # Mark as in-flight so next poll cycle skips this offer
             if offer_key:
                 _pending_reserve_add(offer_key)
