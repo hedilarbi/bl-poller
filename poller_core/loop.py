@@ -130,10 +130,7 @@ _p1_skip_until: Dict[Tuple[str, int], float] = {}
 _p2_active_offers: Dict[Tuple[str, int], Set[str]] = {}
 # P2 rate-limit cooldown: earliest time the next real request is allowed per user.
 _p2_next_poll: Dict[Tuple[str, int], float] = {}
-# min seconds between successful P2 requests per user (configurable via P2_POLL_INTERVAL_S in .env)
-# Global IP-level 429 backoff — shared across ALL users/bots on this server.
-# When Athena rate-limits by IP, blocking one user blocks everyone; this ensures
-# all P2 requests pause together so the IP has a chance to recover.
+_P2_429_BACKOFF_S = 30.0   # fixed wait after a 429 before retrying P2
 
 # P2 burst/calm cycle: poll aggressively for P2_BURST_ACTIVE_DURATION seconds,
 # then calm down for P2_BURST_CALM_DURATION seconds, and repeat.
@@ -721,8 +718,8 @@ def poll_user(user):
             _log_offers_found("P2", telegram_id, offers)
         else:
             if status_code == 429:
-                _p2_next_poll[_p2_key] = time.time() + _p2_current_interval()
-                _poll_log(f"⚠️ P2 [{bot_id}] 429 — retrying next cycle")
+                _p2_next_poll[_p2_key] = time.time() + _P2_429_BACKOFF_S
+                _poll_log(f"⚠️ P2 [{bot_id}] 429 — backing off {_P2_429_BACKOFF_S:.0f}s")
             else:
                 _poll_log(f"⚠️ P2 [{bot_id}] status={status_code} has_token={bool(tok)}")
         return offers, tok
