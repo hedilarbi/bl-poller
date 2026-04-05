@@ -134,17 +134,7 @@ _p2_next_poll: Dict[Tuple[str, int], float] = {}
 # Global IP-level 429 backoff — shared across ALL users/bots on this server.
 # When Athena rate-limits by IP, blocking one user blocks everyone; this ensures
 # all P2 requests pause together so the IP has a chance to recover.
-_p2_global_blocked_until: float = 0.0
-_p2_global_429_count: int = 0
-_p2_backoff_logged: bool = False  # True while we're inside a backoff window — suppresses per-cycle spam
-_p2_last_429_ts: float = 0.0          # monotonic timestamp of most recent global 429
-_p2_global_lock = threading.Lock()
-_P2_BACKOFF_429_BASE_S = 10.0   # initial wait after first global 429
-_P2_BACKOFF_429_MAX_S  = 300.0  # cap at 5 minutes
-# How long the IP must be 429-free before a 200 is allowed to decrement the counter.
-# Without this guard, a single allowed request after a 20s pause resets the counter to 0,
-# preventing backoff from ever growing past count=2 / 20s — the oscillation seen in prod.
-_P2_RECOVERY_WINDOW_S = 120.0   # 2 minutes of clean polling before count decrements
+
 # P2 burst/calm cycle: poll aggressively for P2_BURST_ACTIVE_DURATION seconds,
 # then calm down for P2_BURST_CALM_DURATION seconds, and repeat.
 # The cycle is wall-clock based so all users stay in sync.
@@ -685,27 +675,11 @@ def poll_user(user):
                 offers_p2.append(mapped)
 
     def _fetch_p2_offers_real():
-        global _p2_global_blocked_until, _p2_global_429_count
         nonlocal portal_token
         if not ENABLE_P2:
             return [], portal_token
-        # Global IP-level cooldown: if any user triggered a 429 block, all P2 requests pause.
-        global _p2_backoff_logged
         _p2_key = (str(bot_id), int(telegram_id))
         _now = time.time()
-        with _p2_global_lock:
-            if _now < _p2_global_blocked_until:
-                if not _p2_backoff_logged:
-                    _remaining = _p2_global_blocked_until - _now
-                    _poll_log(f"⏸ P2 all users — global backoff ({_remaining:.0f}s remaining)")
-                    _p2_backoff_logged = True
-                return [], portal_token
-            elif _p2_backoff_logged:
-                _poll_log(f"▶️ P2 global backoff lifted — resuming polls")
-                _p2_backoff_logged = False
-                # Stagger re-entry: assign each user a random delay (0–4s) so they
-                # don't all slam Athena simultaneously the moment backoff expires.
-                _p2_next_poll[_p2_key] = _now + random.uniform(0, 4.0)
         # Per-user cooldown: skip if this specific user polled too recently.
         if _now < _p2_next_poll.get(_p2_key, 0):
             return [], portal_token
@@ -719,7 +693,6 @@ def poll_user(user):
         if not tok:
             return [], tok
         etag = get_offers_etag(bot_id, telegram_id) if ATHENA_USE_OFFERS_ETAG else None
-        _poll_log(f"🔄 P2 [{bot_id}] polling...")
         t0 = time.perf_counter()
         status_code, payload, new_etag = _athena_get_offers(tok, etag=etag)
         observe_ms("p2_fetch_ms", (time.perf_counter() - t0) * 1000.0)
@@ -736,13 +709,7 @@ def poll_user(user):
 
         offers: List[dict] = []
         if status_code == 200 and isinstance(payload, dict):
-            _poll_log(f"✅ P2 [{bot_id}] 200 OK")
             _p2_next_poll[_p2_key] = time.time() + _p2_current_interval()
-            with _p2_global_lock:
-                _p2_global_blocked_until = 0.0
-                # Only decrement count after sustained quiet — 2 min with no 429.
-                if time.time() - _p2_last_429_ts >= _P2_RECOVERY_WINDOW_S:
-                    _p2_global_429_count = max(0, _p2_global_429_count - 1)
             if ATHENA_USE_OFFERS_ETAG and new_etag:
                 set_offers_etag(bot_id, telegram_id, new_etag)
             included = payload.get("included") or []
@@ -754,14 +721,7 @@ def poll_user(user):
             _log_offers_found("P2", telegram_id, offers)
         else:
             if status_code == 429:
-                with _p2_global_lock:
-                    _p2_global_429_count += 1
-                    _p2_last_429_ts = time.time()
-                    n = _p2_global_429_count
-                    backoff = min(_P2_BACKOFF_429_BASE_S * (2 ** (n - 1)), _P2_BACKOFF_429_MAX_S)
-                    _p2_global_blocked_until = _p2_last_429_ts + backoff
-                    _p2_backoff_logged = False  # reset so the next skipped cycle logs once
-                _poll_log(f"⚠️ P2 [{bot_id}] 429 (global_consecutive={n}, backoff={backoff:.0f}s, all P2 paused)")
+                _poll_log(f"⚠️ P2 [{bot_id}] 429 — retrying next cycle")
             else:
                 _poll_log(f"⚠️ P2 [{bot_id}] status={status_code} has_token={bool(tok)}")
         return offers, tok
@@ -930,12 +890,10 @@ def run():
         if cycle_idx % _WARMUP_CYCLE_EVERY == 0:
             _warmup_reserve_connections_async()
         if cycle_idx % _HEARTBEAT_CYCLE_EVERY == 0:
-            with _p2_global_lock:
-                _p2_remaining = max(0.0, _p2_global_blocked_until - time.time())
             _now_hb = time.time()
             _p1_max_skip = max((_v - _now_hb for _v in _p1_skip_until.values()), default=0.0)
             _p1_status = f"cooldown {_p1_max_skip:.0f}s" if _p1_max_skip > 0 else "OK"
-            _poll_log(f"💓 heartbeat | cycle={cycle_idx} p1={_p1_status} p2_backoff={_p2_remaining:.0f}s")
+            _poll_log(f"💓 heartbeat | cycle={cycle_idx} p1={_p1_status}")
         if OFFER_MEMORY_DEDUPE:
             maybe_reset_inmem_caches()
 
