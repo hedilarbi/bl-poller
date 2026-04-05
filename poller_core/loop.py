@@ -525,8 +525,7 @@ def poll_user(user):
                 unpin_warning_if_any(bot_id, telegram_id, "no_token")
                 set_token_ok_mem(bot_id, telegram_id, cache_version)
             offers = results or []
-            if offers:
-                _poll_log(f"✅ P1 [{bot_id}] 200 OK ({len(offers)} offers)")
+            _poll_log(f"✅ P1 [{bot_id}] 200 OK ({len(offers)} offers)")
             _log_offers_found("P1", telegram_id, offers)
             return offers
         if status_code is None:
