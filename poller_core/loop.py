@@ -721,6 +721,7 @@ def poll_user(user):
             _log_offers_found("P2", telegram_id, offers)
         else:
             if status_code == 429:
+                _p2_next_poll[_p2_key] = time.time() + _p2_current_interval()
                 _poll_log(f"⚠️ P2 [{bot_id}] 429 — retrying next cycle")
             else:
                 _poll_log(f"⚠️ P2 [{bot_id}] status={status_code} has_token={bool(tok)}")
