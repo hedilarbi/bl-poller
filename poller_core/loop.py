@@ -706,6 +706,7 @@ def poll_user(user):
 
         offers: List[dict] = []
         if status_code == 200 and isinstance(payload, dict):
+            _poll_log(f"✅ P2 [{bot_id}] 200 OK")
             _p2_next_poll[_p2_key] = time.time() + _p2_current_interval()
             if ATHENA_USE_OFFERS_ETAG and new_etag:
                 set_offers_etag(bot_id, telegram_id, new_etag)
