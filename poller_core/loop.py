@@ -525,7 +525,6 @@ def poll_user(user):
                 unpin_warning_if_any(bot_id, telegram_id, "no_token")
                 set_token_ok_mem(bot_id, telegram_id, cache_version)
             offers = results or []
-            _poll_log(f"✅ P1 [{bot_id}] 200 OK ({len(offers)} offers)")
             _log_offers_found("P1", telegram_id, offers)
             return offers
         if status_code is None:
@@ -705,7 +704,6 @@ def poll_user(user):
 
         offers: List[dict] = []
         if status_code == 200 and isinstance(payload, dict):
-            _poll_log(f"✅ P2 [{bot_id}] 200 OK")
             _p2_next_poll[_p2_key] = time.time() + _p2_current_interval()
             if ATHENA_USE_OFFERS_ETAG and new_etag:
                 set_offers_etag(bot_id, telegram_id, new_etag)

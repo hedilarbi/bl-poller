@@ -239,11 +239,9 @@ def log_offer_decision(bot_id, telegram_id, offer: dict, status: str,
     ec2_api.log_offer_decision(str(bot_id), int(telegram_id), offer, status, reason, notify_text)
 
 
-# Offer message cache — in-memory only (single user per VPS, no persistence needed).
-
 def save_offer_message(bot_id, telegram_id, message_key: str,
                        header_text: str, full_text: str) -> None:
-    _offer_messages[(_key(bot_id, telegram_id), message_key)] = (header_text, full_text)
+    ec2_api.save_offer_message(bot_id, telegram_id, message_key, header_text, full_text)
 
 
 def get_offer_message(bot_id, telegram_id, message_key: str) -> Tuple[Optional[str], Optional[str]]:

@@ -104,6 +104,22 @@ def clear_pinned_warning(bot_id: str, telegram_id: int, kind: str) -> None:
     })
 
 
+def save_offer_message(
+    bot_id: str,
+    telegram_id: int,
+    message_key: str,
+    header_text: str,
+    full_text: str,
+) -> None:
+    _post("/internal/poller/offer-message", {
+        "bot_id": bot_id,
+        "telegram_id": int(telegram_id),
+        "message_key": message_key,
+        "header_text": header_text,
+        "full_text": full_text,
+    })
+
+
 def log_offer_decision(
     bot_id: str,
     telegram_id: int,
