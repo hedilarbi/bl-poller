@@ -698,21 +698,10 @@ def _process_offers_for_user(
         filter_t0 = time.perf_counter()
         oid = offer.get("id")
         platform = offer.get("_platform", "p1")
-        rid0 = (offer.get("rides") or [{}])[0]
-        _price_disp = f"{offer.get('price')} {offer.get('currency','')}"
-        _pu_disp = _extract_addr(rid0.get("pickUpLocation")) or "?"
-        _do_disp = _extract_addr(rid0.get("dropOffLocation")) if rid0.get("dropOffLocation") else "?"
-        _poll_age_ms = int((time.time() - float(offer["_poll_ts"])) * 1000) if offer.get("_poll_ts") else "?"
-        _builtins.print(
-            f"[{datetime.now()}] 🔔 [{platform.upper()}] Offer {oid} | {_price_disp} | "
-            f"class={offer.get('vehicleClass','?')} | poll_age={_poll_age_ms}ms | "
-            f"PU={_pu_disp!r} DO={_do_disp!r}"
-        )
         # Skip offers currently being reserved (fire-and-forget in flight)
         if oid and is_pending_reserve(f"{platform}:{oid}"):
             continue
         if oid and is_recent_not_valid(bot_id, telegram_id, platform, str(oid), cache_version=cache_version):
-            print(f"[{datetime.now()}] ⏭️ Skipping recent not-valid offer {oid} for user {telegram_id} (cached 1m).")
             continue
 
         # Optional memory dedupe; disabled in race mode to avoid missing reused offer ids.
@@ -733,6 +722,15 @@ def _process_offers_for_user(
         pickup = parse_iso_dt_or_none(pickup_s)
         if pickup is None:
             continue
+
+        _price_disp = f"{offer.get('price')} {offer.get('currency','')}"
+        _pu_disp = _extract_addr(rid.get("pickUpLocation")) or "?"
+        _do_disp = _extract_addr(rid.get("dropOffLocation")) if rid.get("dropOffLocation") else "?"
+        _poll_age_ms = int((time.time() - float(offer["_poll_ts"])) * 1000) if offer.get("_poll_ts") else "?"
+        _builtins.print(
+            f"[{datetime.now()}] 🔔 [{platform.upper()}] Offer {oid} | {_price_disp} | "
+            f"class={raw_vc} | poll_age={_poll_age_ms}ms | PU={_pu_disp!r} DO={_do_disp!r}"
+        )
 
         # Compute endsAt using formulas or duration
         ends_at_iso, end_calc = _compute_ends_at(offer, filters, pickup, tz_name)

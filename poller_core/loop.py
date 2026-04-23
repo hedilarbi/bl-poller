@@ -184,6 +184,29 @@ def _poll_log(msg: str):
     _builtins.print(f"[{datetime.now()}] {msg}")
 
 
+def _short_body(body, limit: int = 900) -> str:
+    try:
+        if isinstance(body, (dict, list)):
+            text = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        else:
+            text = str(body)
+    except Exception:
+        text = repr(body)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        return text[:limit] + "...(truncated)"
+    return text
+
+
+def _log_p1_non_200(bot_id: str, status_code, body, context: str = "poll"):
+    if status_code is None:
+        err_detail = body.get("error") if isinstance(body, dict) else None
+        detail = err_detail or _short_body(body)
+        _poll_log(f"⚠️ P1 [{bot_id}] {context} status=None | {detail}")
+        return
+    _poll_log(f"⚠️ P1 [{bot_id}] {context} status={status_code} | body={_short_body(body)}")
+
+
 def _log_offers_found(platform: str, telegram_id: int, offers: List[dict]):
     if not offers:
         return
@@ -430,7 +453,7 @@ def poll_user(user):
             _now_fail = time.time()
             with _p1_fail_counts_lock:
                 _p1_fail_counts[_fail_key] = {"n": 1, "ts": _now_fail}
-            _poll_log(f"⚠️ P1 [{bot_id}] status={status_code} (fail)")
+            _log_p1_non_200(bot_id, status_code, results)
             # Immediately check if other users are also failing — indicates IP-level block.
             with _p1_fail_counts_lock:
                 _other_users_failing = sum(
@@ -497,6 +520,7 @@ def poll_user(user):
                         _p1_fail_counts.pop(_fail_key, None)
                         _p1_skip_until.pop(_ar_key, None)
                         return []
+                    _log_p1_non_200(bot_id, status_code2, results2, context="post-refresh-check")
                     _poll_log(f"❌ [AUTO-REFRESH] [{bot_id}] New token still {status_code2} after Playwright login")
                 # Auto-refresh attempt failed (401/403 from new token, or Playwright itself failed)
                 _ar_n = _auto_refresh_fail_counts.get(_ar_key, 0) + 1
@@ -527,14 +551,7 @@ def poll_user(user):
             offers = results or []
             _log_offers_found("P1", telegram_id, offers)
             return offers
-        if status_code is None:
-            err_detail = results.get("error") if isinstance(results, dict) else None
-            if err_detail:
-                _poll_log(f"⚠️ P1 [{bot_id}] status=None | {err_detail}")
-            else:
-                _poll_log(f"⚠️ P1 [{bot_id}] status=None | body={results}")
-        else:
-            _poll_log(f"⚠️ P1 [{bot_id}] status={status_code} | body={results}")
+        _log_p1_non_200(bot_id, status_code, results)
         return []
 
     # ---------- PLATFORM 2 OFFERS (Portal/Athena) ----------
@@ -874,7 +891,6 @@ def run():
 
     _CLEANUP_CYCLE_EVERY = 200   # cleanup not_valid cache every ~20s at 300ms poll
     _WARMUP_CYCLE_EVERY  = 150   # re-warm reserve connections every ~45s
-    _HEARTBEAT_CYCLE_EVERY = 600 # heartbeat log every ~3min
 
     # Pre-warm reserve connections immediately at startup
     _warmup_reserve_connections_async()
@@ -885,11 +901,6 @@ def run():
             cleanup_not_valid_cache()
         if cycle_idx % _WARMUP_CYCLE_EVERY == 0:
             _warmup_reserve_connections_async()
-        if cycle_idx % _HEARTBEAT_CYCLE_EVERY == 0:
-            _now_hb = time.time()
-            _p1_max_skip = max((_v - _now_hb for _v in _p1_skip_until.values()), default=0.0)
-            _p1_status = f"cooldown {_p1_max_skip:.0f}s" if _p1_max_skip > 0 else "OK"
-            _poll_log(f"💓 heartbeat | cycle={cycle_idx} p1={_p1_status}")
         if OFFER_MEMORY_DEDUPE:
             maybe_reset_inmem_caches()
 
