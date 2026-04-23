@@ -13,6 +13,7 @@ from .config import (
     HTTP_POOL_SIZE,
     P1_STRIP_VOLATILE_HEADERS,
     P1_FORCE_FRESH_REQUEST_IDS,
+    P1_USER_AGENT,
 )
 
 
@@ -64,7 +65,7 @@ def _merge_p1_headers(token: str, base_headers: Optional[dict] = None) -> dict:
         if not _has_header(headers, "X-Operating-System"):
             headers["X-Operating-System"] = "iOS"
         if not _has_header(headers, "User-Agent"):
-            headers["User-Agent"] = "Chauffeur/18575 CFNetwork/3860.300.31 Darwin/25.2.0"
+            headers["User-Agent"] = P1_USER_AGENT
         if not _has_header(headers, "Connection"):
             headers["Connection"] = "keep-alive"
     else:
@@ -75,7 +76,7 @@ def _merge_p1_headers(token: str, base_headers: Optional[dict] = None) -> dict:
             "Accept-Language": "en-CA,en-US;q=0.9,en;q=0.8",
             "Accept-Encoding": "gzip, deflate, br",
             "X-Operating-System": "iOS",
-            "User-Agent": "Chauffeur/18575 CFNetwork/3860.300.31 Darwin/25.2.0",
+            "User-Agent": P1_USER_AGENT,
             "Connection": "keep-alive",
         }
     if P1_FORCE_FRESH_REQUEST_IDS:

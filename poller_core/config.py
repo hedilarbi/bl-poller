@@ -12,6 +12,13 @@ PARTNER_API_BASE = "https://partner-portal-api.blacklane.com"
 PORTAL_CLIENT_ID = os.getenv("BL_PORTAL_CLIENT_ID", "7qL5jGGai6MqBCatVeoihQx5dKEhrNCh")
 MOBILE_CLIENT_ID = os.getenv("BL_MOBILE_CLIENT_ID", "")
 PORTAL_PAGE_SIZE = 50
+P2_PORTAL_USER_AGENT = os.getenv(
+    "P2_PORTAL_USER_AGENT",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+)
+P2_USER_ROLES = os.getenv("P2_USER_ROLES", "dispatcher,driver,provider,admin,reviewer")
+P2_ENABLE_RUM_HEADERS = os.getenv("P2_ENABLE_RUM_HEADERS", "1") == "1"
 
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL_S", "0.3"))
 P2_POLL_INTERVAL_S       = float(os.getenv("P2_POLL_INTERVAL_S",       "2.0"))  # calm-phase interval (safe)
@@ -37,6 +44,11 @@ P2_RESERVE_TIMEOUT_S = int(os.getenv("P2_RESERVE_TIMEOUT_S", "8"))
 P1_REFRESH_SKEW_S = int(os.getenv("P1_REFRESH_SKEW_S", "90"))
 P1_STRIP_VOLATILE_HEADERS = os.getenv("P1_STRIP_VOLATILE_HEADERS", "1") == "1"
 P1_FORCE_FRESH_REQUEST_IDS = os.getenv("P1_FORCE_FRESH_REQUEST_IDS", "1") == "1"
+P1_USER_AGENT = os.getenv(
+    "P1_USER_AGENT",
+    "Chauffeur/24531 CFNetwork/3860.300.31 Darwin/25.2.0",
+)
+P1_ENABLE_RUM_HEADERS = os.getenv("P1_ENABLE_RUM_HEADERS", "1") == "1"
 
 # Toggle mock data for development (default: real polling)
 USE_MOCK_P1 = False    

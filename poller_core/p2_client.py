@@ -1,5 +1,6 @@
 import base64
 import json
+import secrets
 import threading
 import builtins as _builtins
 from typing import Optional, Tuple
@@ -17,6 +18,9 @@ from .config import (
     P2_RESERVE_TIMEOUT_S,
     LOG_RAW_API_RESPONSES,
     HTTP_POOL_SIZE,
+    P2_PORTAL_USER_AGENT,
+    P2_USER_ROLES,
+    P2_ENABLE_RUM_HEADERS,
 )
 from db import get_portal_token, update_portal_token
 
@@ -85,7 +89,7 @@ def _get_p2_reserve_session() -> requests.Session:
 
 
 def warmup_p2_reserve_connection(access_token: str):
-    """Pre-warm the shared P2 reserve session with a GET /chauffeur/offers.
+    """Pre-warm the shared P2 reserve session with a Partner offers GET.
     Call at startup and every ~45s to keep the TCP/TLS connection alive."""
     try:
         sess = _get_p2_reserve_session()
@@ -93,11 +97,13 @@ def warmup_p2_reserve_connection(access_token: str):
             sess.cookies.clear()
         except Exception:
             pass
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "*/*",
-        }
-        sess.request("GET", f"{PARTNER_API_BASE}/chauffeur/offers", headers=headers, timeout=5)
+        headers = _partner_headers(access_token, accept="*/*")
+        sess.request(
+            "GET",
+            f"{PARTNER_API_BASE}/api/v1/chauffeur/offers?page=1&page_size=1",
+            headers=headers,
+            timeout=5,
+        )
     except Exception:
         pass
 
@@ -139,6 +145,89 @@ def _extract_loc_from_included(included_item: dict) -> dict:
     return out
 
 
+def _bearer(access_token: str) -> str:
+    tok = str(access_token or "").strip()
+    if tok.lower().startswith("bearer "):
+        return "Bearer " + tok[7:].strip()
+    return f"Bearer {tok}"
+
+
+def _jwt_payload_unverified(token: Optional[str]) -> dict:
+    try:
+        raw = str(token or "").strip()
+        if raw.lower().startswith("bearer "):
+            raw = raw[7:].strip()
+        parts = raw.split(".")
+        if len(parts) != 3:
+            return {}
+        padded = parts[1] + ("=" * (-len(parts[1]) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _rand64_nonzero() -> int:
+    value = 0
+    while value == 0:
+        value = secrets.randbits(64)
+    return value
+
+
+def _apply_partner_rum_headers(headers: dict) -> None:
+    trace_id = _rand64_nonzero()
+    parent_id = _rand64_nonzero()
+    trace_hex = f"{trace_id:016x}"
+    parent_hex = f"{parent_id:016x}"
+    headers["X-Datadog-Origin"] = "rum"
+    headers["X-Datadog-Trace-Id"] = str(trace_id)
+    headers["X-Datadog-Parent-Id"] = str(parent_id)
+    headers["X-Datadog-Sampling-Priority"] = "1"
+    headers["Traceparent"] = f"00-0000000000000000{trace_hex}-{parent_hex}-01"
+
+
+def _partner_headers(
+    access_token: str,
+    bl_user_id: Optional[str] = None,
+    mobile_token: Optional[str] = None,
+    accept: str = "*/*",
+    content_type: Optional[str] = None,
+) -> dict:
+    claims = _jwt_payload_unverified(mobile_token)
+    user_id = str(bl_user_id or claims.get("chauffeur_id") or "").strip()
+    lsp_id = str(claims.get("lsp_id") or "").strip()
+    bd_id = str(claims.get("bd_id") or "").strip()
+
+    headers = {
+        "Authorization": _bearer(access_token),
+        "Accept": accept,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Origin": "https://partner.blacklane.com",
+        "Referer": "https://partner.blacklane.com/",
+        "User-Agent": P2_PORTAL_USER_AGENT,
+        "Sec-Ch-Ua": '"Not-A.Brand";v="24", "Chromium";v="146"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"macOS"',
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "Priority": "u=1, i",
+        "X-User-Roles": P2_USER_ROLES,
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+    if user_id:
+        headers["X-User-Id"] = user_id
+    if lsp_id:
+        headers["X-User-Lsp-Id"] = lsp_id
+    if bd_id:
+        headers["X-User-Bd-Id"] = bd_id
+    if P2_ENABLE_RUM_HEADERS:
+        _apply_partner_rum_headers(headers)
+    return headers
+
+
 def _normalize_vclass(name: str) -> str:
     m = {
         "business": "Business",
@@ -150,6 +239,74 @@ def _normalize_vclass(name: str) -> str:
     }
     key = (name or "").strip().lower()
     return m.get(key, name or "")
+
+
+def _map_partner_offer(raw: dict) -> Optional[dict]:
+    """Convert partner-portal-api /api/v1/chauffeur/offers item to internal offer shape."""
+    if not isinstance(raw, dict):
+        return None
+    oid = str(raw.get("id") or "")
+    if not oid:
+        return None
+    rides = raw.get("rides") if isinstance(raw.get("rides"), list) else []
+    if not rides:
+        return None
+
+    mapped_rides = []
+    for rid0 in rides:
+        if not isinstance(rid0, dict):
+            continue
+        ride = dict(rid0)
+        pickup_s = ride.get("pickupTime") or ride.get("pickup_time") or ride.get("starts_at")
+        if not pickup_s:
+            continue
+        ride["pickupTime"] = pickup_s
+
+        flight_no = (
+            ride.get("flightNumber")
+            or ride.get("flight_number")
+            or raw.get("flightNumber")
+            or raw.get("flight_number")
+        )
+        if flight_no:
+            ride["flight"] = {"number": str(flight_no)}
+            ride["flight_number"] = str(flight_no)
+
+        special = (
+            ride.get("guestRequests")
+            or ride.get("special_requests")
+            or raw.get("special_requests")
+            or raw.get("specialRequests")
+        )
+        if special and "guestRequests" not in ride:
+            ride["guestRequests"] = special
+
+        mapped_rides.append(ride)
+
+    if not mapped_rides:
+        return None
+
+    price = raw.get("price")
+    try:
+        if price is not None:
+            price = float(price)
+    except Exception:
+        pass
+
+    mapped = {
+        "type": raw.get("type") or "ride",
+        "id": oid,
+        "price": price,
+        "currency": raw.get("currency") or "USD",
+        "vehicleClass": _normalize_vclass(raw.get("vehicleClass") or raw.get("vehicle_class") or ""),
+        "actions": raw.get("actions") or [],
+        "rides": mapped_rides,
+        "_platform": "p2",
+    }
+    first_ride = mapped_rides[0]
+    if first_ride.get("flight_number"):
+        mapped["flight_number"] = first_ride["flight_number"]
+    return mapped
 
 
 def _map_portal_offer(raw: dict, included_idx: dict) -> Optional[dict]:
@@ -258,21 +415,15 @@ def reserve_offer_p2(
     Returns: (status_code, json_or_text)
     """
     url = f"{PARTNER_API_BASE}/chauffeur/offers"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "*/*",
-        "Content-Type": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Origin": "https://partner.blacklane.com",
-        "Referer": "https://partner.blacklane.com/",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-        "X-User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-        "Blacklane-User-Id": str(bl_user_id or ""),
-        "Blacklane-User-Roles": roles or "dispatcher,driver,provider,admin,reviewer",
-        "X-Datadog-Origin": "rum",
-        "X-Datadog-Sampling-Priority": "1",
-    }
+    headers = _partner_headers(
+        access_token,
+        bl_user_id=bl_user_id,
+        accept="*/*",
+        content_type="application/json",
+    )
+    headers["X-User-Agent"] = P2_PORTAL_USER_AGENT
+    headers["Blacklane-User-Id"] = str(bl_user_id or "")
+    headers["Blacklane-User-Roles"] = roles or P2_USER_ROLES
     if extra_headers:
         for k, v in extra_headers.items():
             if v is not None:
@@ -294,6 +445,49 @@ def reserve_offer_p2(
         return r.status_code, body
     except requests.exceptions.RequestException as e:
         return None, {"error": f"{type(e).__name__}: {e}"}
+
+
+def _partner_get_offers(
+    access_token: str,
+    page: int = 1,
+    page_size: int = 30,
+    etag: Optional[str] = None,
+    bl_user_id: Optional[str] = None,
+    mobile_token: Optional[str] = None,
+):
+    """
+    Poll the real Partner Portal offers endpoint.
+    Returns (status_code, payload_or_None, response_etag_or_None).
+    """
+    url = f"{PARTNER_API_BASE}/api/v1/chauffeur/offers?page={int(page)}&page_size={int(page_size)}"
+    headers = _partner_headers(
+        access_token,
+        bl_user_id=bl_user_id,
+        mobile_token=mobile_token,
+        accept="*/*",
+    )
+    if etag:
+        headers["If-None-Match"] = etag
+    try:
+        r = _session_request("GET", url, headers=headers, timeout=P2_POLL_TIMEOUT_S)
+        raw_text = r.text if LOG_RAW_API_RESPONSES else None
+        new_etag = r.headers.get("etag") or r.headers.get("ETag")
+        if r.status_code == 304:
+            return 304, None, new_etag
+        if 200 <= r.status_code < 300:
+            try:
+                payload = r.json()
+                if LOG_RAW_API_RESPONSES and isinstance(payload, dict) and (payload.get("items") or []):
+                    _builtins.print(f"[{datetime.now()}] 🛰️ P2 poll /api/v1/chauffeur/offers full response -> {raw_text}")
+                if isinstance(payload, dict) and new_etag:
+                    payload["__etag"] = new_etag
+                return r.status_code, payload, new_etag
+            except Exception:
+                return r.status_code, None, new_etag
+        return r.status_code, None, new_etag
+    except requests.exceptions.RequestException as e:
+        print(f"[{datetime.now()}] ❌ Partner offers error: {e}")
+        return None, None, None
 
 
 def _athena_login(email: str, password: str) -> Tuple[bool, Optional[str], str]:

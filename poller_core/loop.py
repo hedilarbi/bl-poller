@@ -54,7 +54,8 @@ from .p1_client import get_offers_p1
 from .p1_auth import get_playwright_p1_token, save_playwright_p1_token
 from .p2_client import (
     _map_portal_offer,
-    _athena_get_offers,
+    _map_partner_offer,
+    _partner_get_offers,
     _ensure_portal_token,
     warmup_p2_reserve_connection,
 )
@@ -689,12 +690,12 @@ def poll_user(user):
     def _fetch_p2_offers_real():
         nonlocal portal_token
         if not ENABLE_P2:
-            return [], portal_token
+            return None, portal_token
         _p2_key = (str(bot_id), int(telegram_id))
         _now = time.time()
         # Per-user cooldown: skip if this specific user polled too recently.
         if _now < _p2_next_poll.get(_p2_key, 0):
-            return [], portal_token
+            return None, portal_token
         # Check in-memory cache first — avoids a DB read every 200ms cycle.
         tok = portal_token or get_portal_token_mem(bot_id, telegram_id)
         if not tok and has_portal_creds:
@@ -703,20 +704,33 @@ def poll_user(user):
                 set_portal_token_mem(bot_id, telegram_id, tok)
         portal_token = tok
         if not tok:
-            return [], tok
+            return None, tok
         etag = get_offers_etag(bot_id, telegram_id) if ATHENA_USE_OFFERS_ETAG else None
         t0 = time.perf_counter()
-        status_code, payload, new_etag = _athena_get_offers(tok, etag=etag)
+        status_code, payload, new_etag = _partner_get_offers(
+            tok,
+            page=1,
+            page_size=30,
+            etag=etag,
+            bl_user_id=bl_uuid,
+            mobile_token=token,
+        )
         observe_ms("p2_fetch_ms", (time.perf_counter() - t0) * 1000.0)
 
         if status_code in (401, 403):
-            _poll_log(f"⚠️ Athena token unauthorized for user {telegram_id}. Re-logging...")
+            _poll_log(f"⚠️ Partner token unauthorized for user {telegram_id}. Re-logging...")
             clear_portal_token_mem(bot_id, telegram_id)
             tok = _ensure_portal_token(bot_id, telegram_id, email, password)
             if tok:
                 set_portal_token_mem(bot_id, telegram_id, tok)
                 t1 = time.perf_counter()
-                status_code, payload, new_etag = _athena_get_offers(tok)
+                status_code, payload, new_etag = _partner_get_offers(
+                    tok,
+                    page=1,
+                    page_size=30,
+                    bl_user_id=bl_uuid,
+                    mobile_token=token,
+                )
                 observe_ms("p2_fetch_ms", (time.perf_counter() - t1) * 1000.0)
 
         offers: List[dict] = []
@@ -724,20 +738,27 @@ def poll_user(user):
             _p2_next_poll[_p2_key] = time.time() + _p2_current_interval()
             if ATHENA_USE_OFFERS_ETAG and new_etag:
                 set_offers_etag(bot_id, telegram_id, new_etag)
-            included = payload.get("included") or []
-            included_idx = {(it.get("type"), str(it.get("id"))): it for it in included}
-            for raw in (payload.get("data") or []):
-                mapped = _map_portal_offer(raw, included_idx)
-                if mapped:
-                    offers.append(mapped)
+            if isinstance(payload.get("items"), list):
+                for raw in payload.get("items") or []:
+                    mapped = _map_partner_offer(raw)
+                    if mapped:
+                        offers.append(mapped)
+            else:
+                included = payload.get("included") or []
+                included_idx = {(it.get("type"), str(it.get("id"))): it for it in included}
+                for raw in (payload.get("data") or []):
+                    mapped = _map_portal_offer(raw, included_idx)
+                    if mapped:
+                        offers.append(mapped)
             _log_offers_found("P2", telegram_id, offers)
+            return offers, tok
         else:
             if status_code == 429:
                 _p2_next_poll[_p2_key] = time.time() + _P2_429_BACKOFF_S
                 _poll_log(f"⚠️ P2 [{bot_id}] 429 — backing off {_P2_429_BACKOFF_S:.0f}s")
             else:
                 _poll_log(f"⚠️ P2 [{bot_id}] status={status_code} has_token={bool(tok)}")
-        return offers, tok
+        return None, tok
 
     if not USE_MOCK_P1 or not USE_MOCK_P2:
         if ENABLE_P1 and ENABLE_P2 and not USE_MOCK_P1 and not USE_MOCK_P2:
@@ -773,7 +794,7 @@ def poll_user(user):
                 if isinstance(_p2_res, tuple):
                     offers_p2, portal_token = _p2_res
             except Exception:
-                offers_p2 = []
+                offers_p2 = None
         else:
             if ENABLE_P1 and not USE_MOCK_P1:
                 offers_p1 = _fetch_p1_offers_real()
@@ -784,10 +805,13 @@ def poll_user(user):
     # Only pass NEW P2 offers (not currently active) to processing.
     # An offer is processed when it first appears, then ignored until it disappears and reappears.
     user_key = (str(bot_id), int(telegram_id))
-    current_p2_ids: Set[str] = {o["id"] for o in (offers_p2 or []) if isinstance(o, dict) and o.get("id")}
-    prev_p2_ids = _p2_active_offers.get(user_key, set())
-    new_p2_offers = [o for o in (offers_p2 or []) if isinstance(o, dict) and o.get("id") not in prev_p2_ids]
-    _p2_active_offers[user_key] = current_p2_ids
+    if offers_p2 is None:
+        new_p2_offers = []
+    else:
+        current_p2_ids: Set[str] = {o["id"] for o in (offers_p2 or []) if isinstance(o, dict) and o.get("id")}
+        prev_p2_ids = _p2_active_offers.get(user_key, set())
+        new_p2_offers = [o for o in (offers_p2 or []) if isinstance(o, dict) and o.get("id") not in prev_p2_ids]
+        _p2_active_offers[user_key] = current_p2_ids
 
     # ---------- Combine and process ----------
     # P1 and P2 are processed independently — same offer ID on both platforms produces 2 notifications.

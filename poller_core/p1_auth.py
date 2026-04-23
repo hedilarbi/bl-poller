@@ -12,7 +12,14 @@ from typing import Optional, Tuple
 
 import requests
 
-from .config import MOBILE_AUTH_BASE, MOBILE_CLIENT_ID, P1_POLL_TIMEOUT_S, P1_REFRESH_SKEW_S, HTTP_POOL_SIZE
+from .config import (
+    MOBILE_AUTH_BASE,
+    MOBILE_CLIENT_ID,
+    P1_POLL_TIMEOUT_S,
+    P1_REFRESH_SKEW_S,
+    HTTP_POOL_SIZE,
+    P1_USER_AGENT,
+)
 from db import get_mobile_auth, update_token, set_token_status
 
 _thread_local = threading.local()
@@ -154,7 +161,7 @@ def _build_oauth_headers(mobile_headers: Optional[dict], oauth_headers: Optional
     if not _header_get(headers, "Connection"):
         headers["Connection"] = "keep-alive"
     if not _header_get(headers, "User-Agent"):
-        headers["User-Agent"] = "Chauffeur/20104 CFNetwork/3860.300.31 Darwin/25.2.0"
+        headers["User-Agent"] = P1_USER_AGENT
     return headers
 
 

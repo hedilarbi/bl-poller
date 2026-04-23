@@ -1,3 +1,8 @@
+import base64
+import hashlib
+import json
+import secrets
+import time
 import uuid
 import threading
 import requests
@@ -12,6 +17,8 @@ from .config import (
     LOG_RAW_API_RESPONSES,
     P1_STRIP_VOLATILE_HEADERS,
     P1_FORCE_FRESH_REQUEST_IDS,
+    P1_USER_AGENT,
+    P1_ENABLE_RUM_HEADERS,
     HTTP_POOL_SIZE,
 )
 
@@ -28,6 +35,8 @@ def _log_poll_response(label: str, status: int, body: str):
 
 
 _thread_local = threading.local()
+_trace_session_lock = threading.Lock()
+_trace_session_ids = {}
 
 
 def _get_session() -> requests.Session:
@@ -125,6 +134,89 @@ def _is_volatile_header(name: str) -> bool:
     }
 
 
+def _is_rum_header(name: str) -> bool:
+    lname = str(name or "").lower()
+    return lname.startswith("x-datadog-") or lname in {
+        "traceparent",
+        "tracestate",
+        "baggage",
+    }
+
+
+def _drop_rum_headers(headers: dict):
+    for k in list(headers.keys()):
+        if _is_rum_header(k):
+            headers.pop(k, None)
+
+
+def _jwt_payload_unverified(token: str) -> dict:
+    try:
+        raw = str(token or "").strip()
+        if raw.lower().startswith("bearer "):
+            raw = raw[7:].strip()
+        parts = raw.split(".")
+        if len(parts) != 3:
+            return {}
+        padded = parts[1] + ("=" * (-len(parts[1]) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _token_fingerprint(token: str) -> str:
+    try:
+        return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return "unknown"
+
+
+def _trace_session_id(user_id: Optional[str], token: str) -> str:
+    key = str(user_id or _token_fingerprint(token))
+    with _trace_session_lock:
+        sid = _trace_session_ids.get(key)
+        if not sid:
+            sid = str(uuid.uuid4())
+            _trace_session_ids[key] = sid
+        return sid
+
+
+def _rand64_nonzero() -> int:
+    value = 0
+    while value == 0:
+        value = secrets.randbits(64)
+    return value
+
+
+def _apply_fresh_rum_headers(headers: dict, token: str):
+    _drop_rum_headers(headers)
+
+    payload = _jwt_payload_unverified(token)
+    user_id = payload.get("chauffeur_id")
+    if user_id is not None:
+        user_id = str(user_id)
+
+    tid_hex = f"{int(time.time()):08x}00000000"
+    trace_low = _rand64_nonzero()
+    parent_id = _rand64_nonzero()
+    trace_low_hex = f"{trace_low:016x}"
+    parent_hex = f"{parent_id:016x}"
+    trace_id = f"{tid_hex}{trace_low_hex}"
+
+    headers["x-datadog-sampling-priority"] = "1"
+    headers["x-datadog-trace-id"] = str(trace_low)
+    headers["x-datadog-parent-id"] = str(parent_id)
+    headers["x-datadog-tags"] = f"_dd.p.tid={tid_hex},_dd.p.dm=-1"
+    headers["x-datadog-origin"] = "rum"
+    headers["traceparent"] = f"00-{trace_id}-{parent_hex}-01"
+    headers["tracestate"] = f"dd=o:rum;p:{parent_hex};s:1;t.dm:-1"
+
+    baggage = [f"session.id={_trace_session_id(user_id, token)}"]
+    if user_id:
+        baggage.append(f"user.id={user_id}")
+    headers["baggage"] = ",".join(baggage)
+
+
 def _merge_headers(token: str, base_headers: Optional[dict] = None) -> dict:
     if base_headers:
         headers = {}
@@ -149,7 +241,7 @@ def _merge_headers(token: str, base_headers: Optional[dict] = None) -> dict:
         if "x-operating-system" not in _lk:
             headers["X-Operating-System"] = "iOS"
         if "user-agent" not in _lk:
-            headers["User-Agent"] = "Chauffeur/18575 CFNetwork/3860.300.31 Darwin/25.2.0"
+            headers["User-Agent"] = P1_USER_AGENT
         if "connection" not in _lk:
             headers["Connection"] = "keep-alive"
     else:
@@ -162,9 +254,12 @@ def _merge_headers(token: str, base_headers: Optional[dict] = None) -> dict:
             "X-Request-ID": str(uuid.uuid4()),
             "X-Correlation-ID": str(uuid.uuid4()),
             "X-Operating-System": "iOS",
-            "User-Agent": "Chauffeur/18575 CFNetwork/3860.300.31 Darwin/25.2.0",
+            "User-Agent": P1_USER_AGENT,
             "Connection": "keep-alive",
         }
+    _header_drop(headers, "User-Agent")
+    headers["User-Agent"] = P1_USER_AGENT
+
     if P1_FORCE_FRESH_REQUEST_IDS:
         _header_drop(headers, "X-Request-ID")
         _header_drop(headers, "X-Correlation-ID")
@@ -175,6 +270,9 @@ def _merge_headers(token: str, base_headers: Optional[dict] = None) -> dict:
             headers["X-Request-ID"] = str(uuid.uuid4())
         if not _has_header(headers, "X-Correlation-ID"):
             headers["X-Correlation-ID"] = str(uuid.uuid4())
+
+    if P1_ENABLE_RUM_HEADERS:
+        _apply_fresh_rum_headers(headers, token)
 
     headers["Authorization"] = token
     return headers
