@@ -199,13 +199,22 @@ def _short_body(body, limit: int = 900) -> str:
     return text
 
 
-def _log_p1_non_200(bot_id: str, status_code, body, context: str = "poll"):
-    if status_code is None:
-        err_detail = body.get("error") if isinstance(body, dict) else None
-        detail = err_detail or _short_body(body)
-        _poll_log(f"⚠️ P1 [{bot_id}] {context} status=None | {detail}")
+def _should_log_poll_failure(status_code) -> bool:
+    try:
+        status = int(status_code)
+    except Exception:
+        return False
+    return status in (403, 429) or 500 <= status < 600
+
+
+def _log_poll_failure(platform: str, bot_id: str, status_code, body, context: str = "poll"):
+    if not _should_log_poll_failure(status_code):
         return
-    _poll_log(f"⚠️ P1 [{bot_id}] {context} status={status_code} | body={_short_body(body)}")
+    _poll_log(f"⚠️ {platform} [{bot_id}] {context} status={status_code} | body={_short_body(body)}")
+
+
+def _log_p1_non_200(bot_id: str, status_code, body, context: str = "poll"):
+    _log_poll_failure("P1", bot_id, status_code, body, context=context)
 
 
 def _log_offers_found(platform: str, telegram_id: int, offers: List[dict]):
@@ -718,7 +727,7 @@ def poll_user(user):
         observe_ms("p2_fetch_ms", (time.perf_counter() - t0) * 1000.0)
 
         if status_code in (401, 403):
-            _poll_log(f"⚠️ Partner token unauthorized for user {telegram_id}. Re-logging...")
+            _log_poll_failure("P2", bot_id, status_code, payload)
             clear_portal_token_mem(bot_id, telegram_id)
             tok = _ensure_portal_token(bot_id, telegram_id, email, password)
             if tok:
@@ -755,9 +764,15 @@ def poll_user(user):
         else:
             if status_code == 429:
                 _p2_next_poll[_p2_key] = time.time() + _P2_429_BACKOFF_S
-                _poll_log(f"⚠️ P2 [{bot_id}] 429 — backing off {_P2_429_BACKOFF_S:.0f}s")
+                _log_poll_failure(
+                    "P2",
+                    bot_id,
+                    status_code,
+                    payload,
+                    context=f"poll backing_off={_P2_429_BACKOFF_S:.0f}s",
+                )
             else:
-                _poll_log(f"⚠️ P2 [{bot_id}] status={status_code} has_token={bool(tok)}")
+                _log_poll_failure("P2", bot_id, status_code, payload)
         return None, tok
 
     if not USE_MOCK_P1 or not USE_MOCK_P2:
