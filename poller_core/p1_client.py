@@ -15,6 +15,8 @@ from .config import (
     P1_POLL_TIMEOUT_S,
     P1_RESERVE_TIMEOUT_S,
     LOG_RAW_API_RESPONSES,
+    LOG_POLL_SUCCESS_RESPONSES,
+    POLL_SUCCESS_RESPONSE_LOG_LIMIT,
     P1_STRIP_VOLATILE_HEADERS,
     P1_FORCE_FRESH_REQUEST_IDS,
     P1_USER_AGENT,
@@ -32,6 +34,22 @@ print = _quiet_print
 
 def _log_poll_response(label: str, status: int, body: str):
     return None
+
+
+def _log_success_response(label: str, status: int, offer_count: int, body, raw_text: Optional[str] = None):
+    if not LOG_POLL_SUCCESS_RESPONSES:
+        return
+    try:
+        text = raw_text if raw_text is not None else json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        text = str(body)
+    text = " ".join(str(text).split())
+    limit = int(POLL_SUCCESS_RESPONSE_LOG_LIMIT or 0)
+    if limit > 0 and len(text) > limit:
+        text = text[:limit] + "...(truncated)"
+    _builtins.print(
+        f"[{datetime.now()}] ✅ {label} status={status} offers={offer_count} response={text}"
+    )
 
 
 _thread_local = threading.local()
@@ -307,7 +325,7 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
     headers = _merge_headers(token, headers)
     try:
         r = _session_request("GET", f"{API_HOST}/offers", headers=headers, timeout=P1_POLL_TIMEOUT_S)
-        raw_text = r.text if LOG_RAW_API_RESPONSES else None
+        raw_text = r.text if (LOG_RAW_API_RESPONSES or LOG_POLL_SUCCESS_RESPONSES) else None
         try:
             body = r.json()
         except Exception:
@@ -315,6 +333,7 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
 
         if r.status_code == 200 and isinstance(body, dict):
             results = body.get("results", []) or []
+            _log_success_response("P1 poll /offers", r.status_code, len(results), body, raw_text)
             if results and LOG_RAW_API_RESPONSES:
                 _builtins.print(f"[{datetime.now()}] 🛰️ P1 poll /offers full response -> {raw_text}")
             for it in results:
@@ -323,6 +342,10 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
                 except Exception:
                     pass
             return 200, results
+
+        if r.status_code == 200:
+            _log_success_response("P1 poll /offers", r.status_code, 0, body, raw_text)
+            return 200, []
 
         # return status + body for diagnostics (401/403/etc)
         return r.status_code, body

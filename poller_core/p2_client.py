@@ -17,6 +17,8 @@ from .config import (
     P2_POLL_TIMEOUT_S,
     P2_RESERVE_TIMEOUT_S,
     LOG_RAW_API_RESPONSES,
+    LOG_POLL_SUCCESS_RESPONSES,
+    POLL_SUCCESS_RESPONSE_LOG_LIMIT,
     HTTP_POOL_SIZE,
     P2_PORTAL_USER_AGENT,
     P2_USER_ROLES,
@@ -34,6 +36,22 @@ print = _quiet_print
 
 def _log_poll_response(label: str, status: int, body: str):
     return None
+
+
+def _log_success_response(label: str, status: int, offer_count: int, body, raw_text: Optional[str] = None):
+    if not LOG_POLL_SUCCESS_RESPONSES:
+        return
+    try:
+        text = raw_text if raw_text is not None else json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        text = str(body)
+    text = " ".join(str(text).split())
+    limit = int(POLL_SUCCESS_RESPONSE_LOG_LIMIT or 0)
+    if limit > 0 and len(text) > limit:
+        text = text[:limit] + "...(truncated)"
+    _builtins.print(
+        f"[{datetime.now()}] ✅ {label} status={status} offers={offer_count} response={text}"
+    )
 
 
 _thread_local = threading.local()
@@ -470,13 +488,21 @@ def _partner_get_offers(
         headers["If-None-Match"] = etag
     try:
         r = _session_request("GET", url, headers=headers, timeout=P2_POLL_TIMEOUT_S)
-        raw_text = r.text if LOG_RAW_API_RESPONSES else None
+        raw_text = r.text if (LOG_RAW_API_RESPONSES or LOG_POLL_SUCCESS_RESPONSES) else None
         new_etag = r.headers.get("etag") or r.headers.get("ETag")
         if r.status_code == 304:
             return 304, None, new_etag
         if 200 <= r.status_code < 300:
             try:
                 payload = r.json()
+                offer_count = len(payload.get("items") or []) if isinstance(payload, dict) else 0
+                _log_success_response(
+                    "P2 poll /api/v1/chauffeur/offers",
+                    r.status_code,
+                    offer_count,
+                    payload,
+                    raw_text,
+                )
                 if LOG_RAW_API_RESPONSES and isinstance(payload, dict) and (payload.get("items") or []):
                     _builtins.print(f"[{datetime.now()}] 🛰️ P2 poll /api/v1/chauffeur/offers full response -> {raw_text}")
                 if isinstance(payload, dict) and new_etag:
