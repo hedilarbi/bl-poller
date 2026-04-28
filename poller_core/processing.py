@@ -344,6 +344,7 @@ def _reserve_offer_sync(task: dict) -> dict:
                 str(offer_id),
                 float(task.get("price")),
                 bl_user_id=task.get("bl_user_id"),
+                currency=task.get("currency") or "USD",
             )
         else:
             status_code, body = None, {"error": "unknown_platform"}
@@ -898,8 +899,21 @@ def _process_offers_for_user(
                 return None
             low = text.lower()
             for term in terms:
-                if term and term.strip() and term.lower() in low:
-                    return term
+                t = (term or "").strip()
+                if not t:
+                    continue
+                tl = t.lower()
+                # If the term is a single word (no spaces/special chars), match
+                # only on word boundaries to avoid "us" matching inside "guest".
+                # If the term is a phrase, fall back to plain substring match.
+                if re.search(r"[\s\-/]", tl):
+                    # Multi-word / phrase — substring match is intentional
+                    if tl in low:
+                        return term
+                else:
+                    # Single token — require word boundary on both sides
+                    if re.search(r"(?<![a-z0-9])" + re.escape(tl) + r"(?![a-z0-9])", low):
+                        return term
             return None
 
         hit_pu = _first_blacklist_hit(pu_addr, pickup_terms)
@@ -1088,6 +1102,7 @@ def _process_offers_for_user(
                             "token": p2_token,
                             "price": float(p2_price),
                             "bl_user_id": bl_uuid,
+                            "currency": offer.get("currency") or "USD",
                         },
                     )
 

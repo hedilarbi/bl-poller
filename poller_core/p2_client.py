@@ -193,7 +193,7 @@ def _partner_headers(
     accept: str = "*/*",
     content_type: Optional[str] = None,
 ) -> dict:
-    claims = _jwt_payload_unverified(mobile_token)
+    claims = _jwt_payload_unverified(mobile_token or access_token)
     user_id = str(bl_user_id or claims.get("chauffeur_id") or "").strip()
     lsp_id = str(claims.get("lsp_id") or "").strip()
     bd_id = str(claims.get("bd_id") or "").strip()
@@ -407,29 +407,39 @@ def reserve_offer_p2(
     price: float,
     bl_user_id: Optional[str] = None,
     roles: Optional[str] = None,
+    currency: str = "USD",
     extra_headers: Optional[dict] = None,
 ):
     """
-    Accept an offer on Platform 2 (Partner Portal).
+    Accept an offer on Platform 2 (Partner Portal API).
+
+    Endpoint: POST /api/v1/chauffeur/offers/{offer_id}/acceptance
+    Body: {"currency": str, "price": float, "price_minor_unit": int, "type": "prebooked"}
+
+    JWT claims (X-User-Id, X-User-Lsp-Id, X-User-Bd-Id) are extracted directly
+    from the P2 access_token — no dependency on the P1 mobile token.
 
     Returns: (status_code, json_or_text)
     """
-    url = f"{PARTNER_API_BASE}/chauffeur/offers"
+    url = f"{PARTNER_API_BASE}/api/v1/chauffeur/offers/{offer_id}/acceptance"
     headers = _partner_headers(
         access_token,
         bl_user_id=bl_user_id,
         accept="*/*",
         content_type="application/json",
     )
-    headers["X-User-Agent"] = P2_PORTAL_USER_AGENT
-    headers["Blacklane-User-Id"] = str(bl_user_id or "")
-    headers["Blacklane-User-Roles"] = roles or P2_USER_ROLES
     if extra_headers:
         for k, v in extra_headers.items():
             if v is not None:
                 headers[k] = v
 
-    payload = {"action": "accept", "id": str(offer_id), "price": float(price)}
+    price_minor_unit = int(round(price * 100))
+    payload = {
+        "currency": currency,
+        "price": price,
+        "price_minor_unit": price_minor_unit,
+        "type": "prebooked",
+    }
 
     try:
         sess = _get_p2_reserve_session()
@@ -439,7 +449,7 @@ def reserve_offer_p2(
             pass
         r = sess.request("POST", url, headers=headers, json=payload, timeout=P2_RESERVE_TIMEOUT_S)
         try:
-            body = r.json()
+            body = r.json() if r.content else {}
         except Exception:
             body = r.text
         return r.status_code, body
