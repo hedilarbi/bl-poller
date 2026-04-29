@@ -345,6 +345,7 @@ def _reserve_offer_sync(task: dict) -> dict:
                 float(task.get("price")),
                 bl_user_id=task.get("bl_user_id"),
                 currency=task.get("currency") or "USD",
+                identity_token=task.get("identity_token"),
             )
         else:
             status_code, body = None, {"error": "unknown_platform"}
@@ -1103,6 +1104,7 @@ def _process_offers_for_user(
                             "price": float(p2_price),
                             "bl_user_id": bl_uuid,
                             "currency": offer.get("currency") or "USD",
+                            "identity_token": p1_token,  # for X-User-Lsp-Id / X-User-Bd-Id
                         },
                     )
 

@@ -409,6 +409,7 @@ def reserve_offer_p2(
     roles: Optional[str] = None,
     currency: str = "USD",
     extra_headers: Optional[dict] = None,
+    identity_token: Optional[str] = None,
 ):
     """
     Accept an offer on Platform 2 (Partner Portal API).
@@ -416,8 +417,11 @@ def reserve_offer_p2(
     Endpoint: POST /api/v1/chauffeur/offers/{offer_id}/acceptance
     Body: {"currency": str, "price": float, "price_minor_unit": int, "type": "prebooked"}
 
-    JWT claims (X-User-Id, X-User-Lsp-Id, X-User-Bd-Id) are extracted directly
-    from the P2 access_token — no dependency on the P1 mobile token.
+    access_token : P2 Athena/portal OAuth token  (Authorization: Bearer ...)
+    identity_token: P1 mobile JWT, used ONLY to extract identity claims
+                    (lsp_id → X-User-Lsp-Id, bd_id → X-User-Bd-Id) that
+                    Blacklane requires on the Partner API but encodes only
+                    in the mobile token, not in the Athena token.
 
     Returns: (status_code, json_or_text)
     """
@@ -425,6 +429,7 @@ def reserve_offer_p2(
     headers = _partner_headers(
         access_token,
         bl_user_id=bl_user_id,
+        mobile_token=identity_token,  # source of lsp_id / bd_id claims only
         accept="*/*",
         content_type="application/json",
     )
