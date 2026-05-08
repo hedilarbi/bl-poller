@@ -685,12 +685,17 @@ def _athena_assigned_driver_id(raw_ride: dict) -> str | None:
 def _filter_rides_by_bl_uuid(raw_items: list, bl_uuid: str) -> list:
     """
     Works for both Athena rides (JSON:API) and Mobile /rides payloads.
-    Keeps only rides whose assigned driver id == bl_uuid.
+    Keeps only rides whose assigned driver id == bl_uuid AND whose status
+    is active (accepted). Cancelled / completed rides must not block new offers.
+
     - Athena: relationships.assigned_driver.data.id
-    - Mobile: item['chauffeur']['id']
+    - Mobile: item['chauffeur']['id'], item['rideStatus']
     """
     if not bl_uuid:
         return []
+
+    # Statuses considered "busy" — anything else (completed, cancelled…) is ignored
+    _ACTIVE_STATUSES = {"accepted", "on_way", "arrived", "in_progress", "started"}
 
     filtered = []
     for it in (raw_items or []):
@@ -701,10 +706,15 @@ def _filter_rides_by_bl_uuid(raw_items: list, bl_uuid: str) -> list:
                 filtered.append(it)
             continue
 
-        # Mobile shape
+        # Mobile shape — filter by rideStatus first
+        status = str((it or {}).get("rideStatus") or "").lower()
+        if status and status not in _ACTIVE_STATUSES:
+            continue  # skip completed / cancelled rides
+
         ch = (it or {}).get("chauffeur") or {}
         did = ch.get("id")
         if did and str(did) == str(bl_uuid):
             filtered.append(it)
 
     return filtered
+

@@ -93,17 +93,22 @@ def _get_reserve_session() -> requests.Session:
 
 
 def warmup_p1_reserve_connection(token: str, headers: Optional[dict] = None):
-    """Pre-warm the shared reserve session with a GET /offers.
+    """Pre-warm the shared reserve session with a GET /api/v1/chauffeur/offers.
     Call at startup and every ~45s to keep the TCP/TLS connection alive."""
     try:
         hdrs = _merge_headers(token, headers)
-        _reserve_session_lock  # just reference to ensure module loaded
         sess = _get_reserve_session()
         try:
             sess.cookies.clear()
         except Exception:
             pass
-        sess.request("GET", f"{API_HOST}/offers", headers=hdrs, timeout=max(3, int(P1_POLL_TIMEOUT_S)))
+        sess.request(
+            "GET",
+            f"{API_HOST}/api/v1/chauffeur/offers",
+            params={"order_by": "ASC", "page": 1, "page_size": 1, "sort_by": "start_time"},
+            headers=hdrs,
+            timeout=max(3, int(P1_POLL_TIMEOUT_S)),
+        )
     except Exception:
         pass
 
@@ -305,8 +310,20 @@ def get_rides_p1(token: str, headers: Optional[dict] = None) -> Tuple[Optional[i
 
 def get_offers_p1(token: str, headers: Optional[dict] = None):
     headers = _merge_headers(token, headers)
+    params = {
+        "order_by": "ASC",
+        "page": 1,
+        "page_size": 30,
+        "sort_by": "start_time",
+    }
     try:
-        r = _session_request("GET", f"{API_HOST}/offers", headers=headers, timeout=P1_POLL_TIMEOUT_S)
+        r = _session_request(
+            "GET",
+            f"{API_HOST}/api/v1/chauffeur/offers",
+            headers=headers,
+            params=params,
+            timeout=P1_POLL_TIMEOUT_S,
+        )
         raw_text = r.text if LOG_RAW_API_RESPONSES else None
         try:
             body = r.json()
@@ -316,7 +333,7 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
         if r.status_code == 200 and isinstance(body, dict):
             results = body.get("results", []) or []
             if results and LOG_RAW_API_RESPONSES:
-                _builtins.print(f"[{datetime.now()}] 🛰️ P1 poll /offers full response -> {raw_text}")
+                _builtins.print(f"[{datetime.now()}] 🛰️ P1 poll /api/v1/chauffeur/offers full response -> {raw_text}")
             for it in results:
                 try:
                     it["_platform"] = "p1"
@@ -331,7 +348,6 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
         return r.status_code, body
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
-        # silence poll logs
         return None, {"error": err}
 
 

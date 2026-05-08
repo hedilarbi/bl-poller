@@ -29,11 +29,13 @@ from .config import (
     MAX_LOGGED_OFFERS,
     OFFER_MEMORY_DEDUPE,
     ATHENA_USE_OFFERS_ETAG,
+    RIDES_REFRESH_INTERVAL_S,
 )
 from .state import (
     maybe_reset_inmem_caches,
     cleanup_not_valid_cache,
     get_rides_intervals,
+    get_rides_cache_age_s,
     maybe_cleanup_rides,
     invalidate_rides_cache,
     get_offers_etag,
@@ -858,6 +860,28 @@ def poll_user(user):
                     portal_email=email,
                     portal_password=password,
                 )
+        else:
+            # Periodic refresh: re-fetch from API if cache is older than RIDES_REFRESH_INTERVAL_S
+            age_s = get_rides_cache_age_s(bot_id, telegram_id)
+            if age_s is not None and age_s >= RIDES_REFRESH_INTERVAL_S:
+                p1_ref_token = token if (token and str(token).strip()) else None
+                if p1_ref_token:
+                    _poll_log(
+                        f"🔄 Rides cache stale ({age_s:.0f}s >= {RIDES_REFRESH_INTERVAL_S}s) "
+                        f"for {bot_id}/{telegram_id} — refreshing"
+                    )
+                    from .processing import _refresh_rides_cache_async
+                    _refresh_rides_cache_async(
+                        bot_id,
+                        telegram_id,
+                        tz_name,
+                        p1_ref_token,
+                        mobile_headers,
+                        portal_token,
+                        bl_uuid=bl_uuid,
+                        portal_email=email,
+                        portal_password=password,
+                    )
         accepted_intervals = cached_intervals or []
 
     if not all_offers:

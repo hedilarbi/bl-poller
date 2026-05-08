@@ -81,11 +81,24 @@ def get_rides_intervals(bot_id: str, telegram_id: int) -> Optional[List[Tuple[da
 def set_rides_fetched(bot_id: str, telegram_id: int, rides_dict: Dict[str, Tuple[datetime, Optional[datetime]]]):
     """Store the initial /rides result (keyed by ride_id)."""
     key = (str(bot_id), int(telegram_id))
+    now = time.time()
     _rides_cache[key] = {
         "rides": dict(rides_dict),
         "fetched": True,
-        "last_cleanup": time.time(),
+        "last_fetch": now,
+        "last_cleanup": now,
     }
+
+
+def get_rides_cache_age_s(bot_id: str, telegram_id: int) -> Optional[float]:
+    """Return seconds since the last /rides fetch, or None if never fetched."""
+    entry = _rides_cache.get((str(bot_id), int(telegram_id)))
+    if not entry or not entry.get("fetched"):
+        return None
+    last = entry.get("last_fetch")
+    if last is None:
+        return None
+    return time.time() - float(last)
 
 
 def add_ride_to_cache(bot_id: str, telegram_id: int, ride_id: str, pickup_dt: datetime, end_dt: Optional[datetime]):
