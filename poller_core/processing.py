@@ -696,6 +696,11 @@ def _process_offers_for_user(
                 _s, _e = _e, _s
             _parsed_booked_slots.append((_s, _e, _slot))
 
+    # Accumulates time intervals of offers submitted THIS cycle so that
+    # subsequent offers in the same batch cannot overlap them.
+    # Fixes: bot accepting two offers at the same time within one poll cycle.
+    current_cycle_intervals: List[Tuple[datetime, Optional[datetime]]] = []
+
     for offer in offers:
         filter_t0 = time.perf_counter()
         oid = offer.get("id")
@@ -971,7 +976,7 @@ def _process_offers_for_user(
             record_result("Créneaux bloqués", conflict_reason is None, conflict_reason)
 
         # 5.5) Conflict with already accepted offers (busy intervals)
-        effective_busy_intervals = accepted_intervals + pending_intervals
+        effective_busy_intervals = accepted_intervals + pending_intervals + current_cycle_intervals
         conflict_with = _find_conflict(pickup, ends_at_iso, effective_busy_intervals)
         if conflict_with:
             a_start, a_end = conflict_with
@@ -1112,6 +1117,13 @@ def _process_offers_for_user(
             _builtins.print(
                 f"[{datetime.now()}] 🚀 [{platform.upper()}] Reserving {oid} | {_price_disp}"
             )
+            # Block subsequent offers in THIS cycle from overlapping this time slot.
+            if predicted_end:
+                current_cycle_intervals.append((pickup, predicted_end))
+            elif pickup:
+                # No end time known — use a 2h safety buffer.
+                from datetime import timedelta as _td
+                current_cycle_intervals.append((pickup, pickup + _td(hours=2)))
             # Mark as in-flight so next poll cycle skips this offer
             if offer_key:
                 _pending_reserve_add(offer_key)
