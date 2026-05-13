@@ -81,6 +81,7 @@ def _refresh_rides_cache_now(
     bl_uuid: Optional[str] = None,
     portal_email: Optional[str] = None,
     portal_password: Optional[str] = None,
+    filters: Optional[dict] = None,
 ):
     intervals: List[Tuple[datetime, Optional[datetime]]] = []
 
@@ -88,7 +89,7 @@ def _refresh_rides_cache_now(
         status_code, ride_results = get_rides_p1(p1_token, headers=p1_headers)
         if status_code == 200 and isinstance(ride_results, list):
             kept = _filter_rides_by_bl_uuid(ride_results, bl_uuid) if bl_uuid else ride_results
-            intervals.extend(_extract_intervals_from_rides(kept))
+            intervals.extend(_extract_intervals_from_rides(kept, filters=filters, tz_name=tz_name))
 
     set_rides_cache(bot_id, telegram_id, intervals)
 
@@ -107,6 +108,7 @@ def _refresh_rides_cache_async(
     bl_uuid: Optional[str] = None,
     portal_email: Optional[str] = None,
     portal_password: Optional[str] = None,
+    filters: Optional[dict] = None,
 ):
     def _job():
         try:
@@ -120,6 +122,7 @@ def _refresh_rides_cache_async(
                 bl_uuid=bl_uuid,
                 portal_email=portal_email,
                 portal_password=portal_password,
+                filters=filters,
             )
         except Exception:
             invalidate_rides_cache(bot_id, telegram_id)
@@ -137,6 +140,7 @@ def _init_rides_cache_now(
     bl_uuid: Optional[str] = None,
     portal_email: Optional[str] = None,
     portal_password: Optional[str] = None,
+    filters: Optional[dict] = None,
 ):
     """Fetch rides once and store keyed by ride_id. Called on first poll only."""
     rides_dict: Dict[str, Any] = {}
@@ -147,7 +151,7 @@ def _init_rides_cache_now(
             kept = _filter_rides_by_bl_uuid(ride_results, bl_uuid) if bl_uuid else []
             for i, r in enumerate(kept):
                 rid = str(r.get("id") or f"_p1_{i}")
-                intervals = _extract_intervals_from_rides([r])
+                intervals = _extract_intervals_from_rides([r], filters=filters, tz_name=tz_name)
                 if intervals:
                     rides_dict[f"p1_{rid}"] = intervals[0]
 
@@ -164,6 +168,7 @@ def _init_rides_cache_async(
     bl_uuid: Optional[str] = None,
     portal_email: Optional[str] = None,
     portal_password: Optional[str] = None,
+    filters: Optional[dict] = None,
 ):
     def _job():
         try:
@@ -177,6 +182,7 @@ def _init_rides_cache_async(
                 bl_uuid=bl_uuid,
                 portal_email=portal_email,
                 portal_password=portal_password,
+                filters=filters,
             )
         except Exception:
             invalidate_rides_cache(bot_id, telegram_id)

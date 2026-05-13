@@ -9,6 +9,7 @@ from .utils import (
     _fmt_minutes,
     _duration_minutes_from_rid,
     _extract_addr,
+    _pick_formula_for_pickup,
 )
 from .timeparse import parse_iso_dt_or_none
 from .notify import maybe_send_message
@@ -21,7 +22,20 @@ def _quiet_print(*args, **kwargs):
 
 print = _quiet_print
 
-def _extract_intervals_from_rides(rides: list) -> List[Tuple[datetime, Optional[datetime]]]:
+def _extract_intervals_from_rides(
+    rides: list,
+    filters: Optional[dict] = None,
+    tz_name: Optional[str] = None,
+) -> List[Tuple[datetime, Optional[datetime]]]:
+    """
+    Convert a list of /rides API items into (pickup_dt, end_dt) intervals.
+
+    end_dt resolution order (first match wins):
+      1. endsAt / ends_at / end_time  (provided by Blacklane API)
+      2. estimatedDurationMinutes     (provided by Blacklane API)
+      3. distance + speed_kmh formula (admin config)  ← NEW
+      4. None — ride will be ignored by _find_conflict (known limitation)
+    """
     out: List[Tuple[datetime, Optional[datetime]]] = []
     for it in (rides or []):
         rid = it if isinstance(it, dict) else {}
@@ -38,11 +52,34 @@ def _extract_intervals_from_rides(rides: list) -> List[Tuple[datetime, Optional[
         if start_dt is None:
             continue
 
-        # end time or duration
         end_dt = None
-        end_s = rid.get("endsAt") or rid.get("ends_at") or rid.get("end_time")
-        if end_s:
-            end_dt = parse_iso_dt_or_none(end_s)
+
+        # 1. Admin formula (PRIORITY): distance (km) / speed_kmh * 60 * 2 + bonus_min
+        #    More accurate than Blacklane estimates when admin has calibrated speed/bonus.
+        if filters and tz_name:
+            try:
+                dist_km = rid.get("distance")  # /rides returns distance in km
+                ride_type = (rid.get("rideType") or "").lower()
+                if dist_km is not None and ride_type == "transfer":
+                    dist_km = float(dist_km)
+                    rule = _pick_formula_for_pickup(filters, start_dt, tz_name)
+                    if rule:
+                        speed = float(rule.get("speed_kmh") or 0.0)
+                        bonus = float(rule.get("bonus_min") or 0.0)
+                        if speed > 0:
+                            one_way_min = (dist_km / speed) * 60.0
+                            total_min = one_way_min * 2.0 + bonus
+                            end_dt = start_dt + timedelta(minutes=total_min)
+            except Exception:
+                end_dt = None
+
+        # 2. endsAt from API
+        if not end_dt:
+            end_s = rid.get("endsAt") or rid.get("ends_at") or rid.get("end_time")
+            if end_s:
+                end_dt = parse_iso_dt_or_none(end_s)
+
+        # 3. estimatedDurationMinutes from API
         if not end_dt:
             dur_min = _duration_minutes_from_rid(rid)
             if dur_min is not None:

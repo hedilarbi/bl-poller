@@ -859,6 +859,7 @@ def poll_user(user):
                     bl_uuid=bl_uuid,
                     portal_email=email,
                     portal_password=password,
+                    filters=user_cfilters,
                 )
         else:
             # Periodic refresh: re-fetch from API if cache is older than RIDES_REFRESH_INTERVAL_S
@@ -881,6 +882,7 @@ def poll_user(user):
                         bl_uuid=bl_uuid,
                         portal_email=email,
                         portal_password=password,
+                        filters=user_cfilters,
                     )
         accepted_intervals = cached_intervals or []
 
