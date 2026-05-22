@@ -200,14 +200,16 @@ def _find_conflict(
     new_end_iso: Optional[str],
     accepted_intervals: List[Tuple[datetime, Optional[datetime]]],
 ) -> Optional[Tuple[datetime, datetime]]:
+    from datetime import timedelta
     new_end = None
     if new_end_iso:
         new_end = parse_iso_dt_or_none(new_end_iso)
     for a_start, a_end in accepted_intervals:
-        if not a_end:
-            continue
-        if a_start <= new_start <= a_end:
-            return (a_start, a_end)
-        if new_end and not (new_end <= a_start or new_start >= a_end):
-            return (a_start, a_end)
+        # If end time is unknown, use a conservative 4h safety window
+        # rather than silently skipping the ride (which caused accepted conflicts).
+        effective_end = a_end if a_end else (a_start + timedelta(hours=4))
+        if a_start <= new_start <= effective_end:
+            return (a_start, effective_end)
+        if new_end and not (new_end <= a_start or new_start >= effective_end):
+            return (a_start, effective_end)
     return None

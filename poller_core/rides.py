@@ -54,12 +54,26 @@ def _extract_intervals_from_rides(
 
         end_dt = None
 
-        # 1. Admin formula (PRIORITY): distance (km) / speed_kmh * 60 * 2 + bonus_min
-        #    More accurate than Blacklane estimates when admin has calibrated speed/bonus.
-        if filters and tz_name:
+        # 1a. Hourly ride: durationMinutes + 2h safety buffer (mirrors _compute_ends_at)
+        if filters and tz_name and not end_dt:
+            try:
+                ride_type = (rid.get("rideType") or rid.get("type") or "").lower()
+                if ride_type == "hourly":
+                    _SAFETY_BUFFER_MIN = 120.0
+                    dur_min = _duration_minutes_from_rid(rid)
+                    if dur_min is not None:
+                        end_dt = start_dt + timedelta(minutes=float(dur_min) + _SAFETY_BUFFER_MIN)
+                    else:
+                        # No duration info at all → 2h safety buffer alone
+                        end_dt = start_dt + timedelta(minutes=_SAFETY_BUFFER_MIN)
+            except Exception:
+                end_dt = None
+
+        # 1b. Transfer ride: admin formula (distance / speed * 2 + bonus)
+        if filters and tz_name and not end_dt:
             try:
                 dist_km = rid.get("distance")  # /rides returns distance in km
-                ride_type = (rid.get("rideType") or "").lower()
+                ride_type = (rid.get("rideType") or rid.get("type") or "").lower()
                 if dist_km is not None and ride_type == "transfer":
                     dist_km = float(dist_km)
                     rule = _pick_formula_for_pickup(filters, start_dt, tz_name)

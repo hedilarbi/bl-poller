@@ -305,13 +305,60 @@ def poll_user(user):
             },
         )
 
-    # ---------- Build busy intervals from Rides (Athena preferred) ----------
-    accepted_intervals: List[Tuple[datetime, Optional[datetime]]] = []
-
-    has_portal_creds = bool(email and password)
+    # These must be initialized before the rides cache block below.
     portal_token = None
-
     poll_real_orders = ALWAYS_POLL_REAL_ORDERS and not (USE_MOCK_P1 and USE_MOCK_P2)
+
+    # ---------- Build busy intervals from Rides ----------
+    # IMPORTANT: this block must run BEFORE processing P1 offers (early path below)
+    # so the conflict filter is never bypassed due to an uninitialized cache.
+    accepted_intervals: List[Tuple[datetime, Optional[datetime]]] = []
+    if poll_real_orders:
+        maybe_cleanup_rides(bot_id, telegram_id)
+        cached_intervals = get_rides_intervals(bot_id, telegram_id)
+        if cached_intervals is None:
+            # First time: lazy-init rides cache in background (one-shot fetch)
+            p1_init_token = token if (token and str(token).strip()) else None
+            if p1_init_token:
+                _init_rides_cache_async(
+                    bot_id,
+                    telegram_id,
+                    tz_name,
+                    p1_init_token,
+                    mobile_headers,
+                    None,  # p2_token not available yet
+                    bl_uuid=bl_uuid,
+                    portal_email=email,
+                    portal_password=password,
+                    filters=filters,  # contains __endtime_formulas__ for end_dt pre-computation
+                )
+            # Cache not ready yet — skip this cycle entirely to avoid accepting
+            # offers without the conflict filter in place.
+            return f"Done with user {telegram_id} (rides cache init pending)"
+        else:
+            # Periodic refresh: re-fetch from API if cache is older than RIDES_REFRESH_INTERVAL_S
+            age_s = get_rides_cache_age_s(bot_id, telegram_id)
+            if age_s is not None and age_s >= RIDES_REFRESH_INTERVAL_S:
+                p1_ref_token = token if (token and str(token).strip()) else None
+                if p1_ref_token:
+                    _poll_log(
+                        f"🔄 Rides cache stale ({age_s:.0f}s >= {RIDES_REFRESH_INTERVAL_S}s) "
+                        f"for {bot_id}/{telegram_id} — refreshing"
+                    )
+                    from .processing import _refresh_rides_cache_async
+                    _refresh_rides_cache_async(
+                        bot_id,
+                        telegram_id,
+                        tz_name,
+                        p1_ref_token,
+                        mobile_headers,
+                        None,
+                        bl_uuid=bl_uuid,
+                        portal_email=email,
+                        portal_password=password,
+                        filters=filters,  # contains __endtime_formulas__ for end_dt pre-computation
+                    )
+        accepted_intervals = cached_intervals or []
 
     # Gate P1 only — P2 still polls independently even when P1 is in cooldown or
     # has an invalid token, so offers on Athena are never silently missed.
@@ -841,50 +888,6 @@ def poll_user(user):
             offer["_poll_ts"] = now_ts
         all_offers.append(offer)
 
-    if poll_real_orders:
-        maybe_cleanup_rides(bot_id, telegram_id)
-        cached_intervals = get_rides_intervals(bot_id, telegram_id)
-        if cached_intervals is None:
-            # First time: lazy-init rides cache in background (one-shot fetch)
-            p2_init_token = portal_token if portal_token else None
-            p1_init_token = token if (token and str(token).strip()) else None
-            if p2_init_token or p1_init_token:
-                _init_rides_cache_async(
-                    bot_id,
-                    telegram_id,
-                    tz_name,
-                    p1_init_token,
-                    mobile_headers,
-                    p2_init_token,
-                    bl_uuid=bl_uuid,
-                    portal_email=email,
-                    portal_password=password,
-                    filters=user_cfilters,
-                )
-        else:
-            # Periodic refresh: re-fetch from API if cache is older than RIDES_REFRESH_INTERVAL_S
-            age_s = get_rides_cache_age_s(bot_id, telegram_id)
-            if age_s is not None and age_s >= RIDES_REFRESH_INTERVAL_S:
-                p1_ref_token = token if (token and str(token).strip()) else None
-                if p1_ref_token:
-                    _poll_log(
-                        f"🔄 Rides cache stale ({age_s:.0f}s >= {RIDES_REFRESH_INTERVAL_S}s) "
-                        f"for {bot_id}/{telegram_id} — refreshing"
-                    )
-                    from .processing import _refresh_rides_cache_async
-                    _refresh_rides_cache_async(
-                        bot_id,
-                        telegram_id,
-                        tz_name,
-                        p1_ref_token,
-                        mobile_headers,
-                        portal_token,
-                        bl_uuid=bl_uuid,
-                        portal_email=email,
-                        portal_password=password,
-                        filters=user_cfilters,
-                    )
-        accepted_intervals = cached_intervals or []
 
     if not all_offers:
         return f"Done with user {telegram_id}"
