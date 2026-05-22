@@ -83,7 +83,6 @@ def _refresh_rides_cache_now(
     portal_password: Optional[str] = None,
     filters: Optional[dict] = None,
 ):
-    from .utils import _fmt_dt_local
     intervals: List[Tuple[datetime, Optional[datetime]]] = []
 
     if p1_token:
@@ -91,19 +90,6 @@ def _refresh_rides_cache_now(
         if status_code == 200 and isinstance(ride_results, list):
             kept = _filter_rides_by_bl_uuid(ride_results, bl_uuid) if bl_uuid else ride_results
             intervals.extend(_extract_intervals_from_rides(kept, filters=filters, tz_name=tz_name))
-
-    none_count = sum(1 for (_, e) in intervals if e is None)
-    _builtins.print(
-        f"[{datetime.now()}] 🔄 RIDES REFRESH [{bot_id}] "
-        f"{len(intervals)} ride(s) | end_dt manquant: {none_count}"
-    )
-    for idx, (pickup, end_dt) in enumerate(intervals):
-        pu_s  = _fmt_dt_local(pickup.isoformat() if pickup else "", tz_name) if pickup else "?"
-        end_s = _fmt_dt_local(end_dt.isoformat() if end_dt else "", tz_name) if end_dt else "None ⚠️"
-        dur_s = f"{int((end_dt - pickup).total_seconds() / 60)} min" if (end_dt and pickup) else "?"
-        _builtins.print(
-            f"[{datetime.now()}]   [{idx+1}] pickup={pu_s} → end={end_s} ({dur_s})"
-        )
 
     set_rides_cache(bot_id, telegram_id, intervals)
 
@@ -161,7 +147,6 @@ def _init_rides_cache_now(
     end_dt is pre-computed here using the admin formula so that _find_conflict
     never receives a None end time for a ride that has distance data.
     """
-    from .utils import _fmt_dt_local
     rides_dict: Dict[str, Any] = {}
 
     if p1_token:
@@ -169,41 +154,13 @@ def _init_rides_cache_now(
         if status_code == 200 and isinstance(ride_results, list):
             # BUG FIX: was `else []` — if no bl_uuid, keep ALL rides instead of dropping them
             kept = _filter_rides_by_bl_uuid(ride_results, bl_uuid) if bl_uuid else ride_results
-            _builtins.print(
-                f"[{datetime.now()}] 📋 RIDES INIT [{bot_id}] "
-                f"{len(kept)} ride(s) reçu(es) de l'API"
-            )
             for i, r in enumerate(kept):
                 rid = str(r.get("id") or f"_p1_{i}")
                 # Pre-compute end_dt at store time — never store (pickup, None) for transfer rides
                 intervals = _extract_intervals_from_rides([r], filters=filters, tz_name=tz_name)
                 if intervals:
-                    pickup, end_dt = intervals[0]
-                    rides_dict[f"p1_{rid}"] = (pickup, end_dt)
-                    pu_s  = _fmt_dt_local(pickup.isoformat() if pickup else "", tz_name) if pickup else "?"
-                    end_s = _fmt_dt_local(end_dt.isoformat() if end_dt else "", tz_name) if end_dt else "None ⚠️"
-                    dur_s = f"{int((end_dt - pickup).total_seconds() / 60)} min" if (end_dt and pickup) else "?"
-                    rtype = (r.get("rideType") or r.get("type") or "?").lower()
-                    dist  = r.get("distance")
-                    _builtins.print(
-                        f"[{datetime.now()}]   [{i+1}] id={rid} type={rtype} dist={dist}km "
-                        f"pickup={pu_s} → end={end_s} ({dur_s})"
-                    )
-                else:
-                    _builtins.print(
-                        f"[{datetime.now()}]   [{i+1}] id={rid} ⚠️ pickup non parseable — ignorée"
-                    )
-        else:
-            _builtins.print(
-                f"[{datetime.now()}] ⚠️ RIDES INIT [{bot_id}] "
-                f"API status={status_code} — cache vide"
-            )
+                    rides_dict[f"p1_{rid}"] = intervals[0]
 
-    none_count = sum(1 for (_, e) in rides_dict.values() if e is None)
-    _builtins.print(
-        f"[{datetime.now()}] ✅ RIDES INIT [{bot_id}] "
-        f"{len(rides_dict)} ride(s) stockée(s) | end_dt manquant: {none_count}"
-    )
     set_rides_fetched(bot_id, telegram_id, rides_dict)
 
 
