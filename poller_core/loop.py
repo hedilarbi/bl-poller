@@ -514,9 +514,11 @@ def poll_user(user):
                 return []
             _set_token_problem("no_token")
             return []
+        _poll_log(f"📡 [P1] poll {bot_id}/{telegram_id}")
         t0 = time.perf_counter()
         status_code, results = get_offers_p1(token, headers=mobile_headers)
         observe_ms("p1_fetch_ms", (time.perf_counter() - t0) * 1000.0)
+        _poll_log(f"📡 [P1] status={status_code} offers={len(results) if isinstance(results, list) else '?'} ({int((time.perf_counter()-t0)*1000)}ms)")
         if status_code in (401, 403):
             _fail_key = (str(bot_id), int(telegram_id))
             _now_fail = time.time()
@@ -773,6 +775,7 @@ def poll_user(user):
         portal_token = tok
         if not tok:
             return None, tok
+        _poll_log(f"📡 [P2] poll {bot_id}/{telegram_id}")
         etag = get_offers_etag(bot_id, telegram_id) if ATHENA_USE_OFFERS_ETAG else None
         t0 = time.perf_counter()
         status_code, payload, new_etag = _partner_get_offers(
