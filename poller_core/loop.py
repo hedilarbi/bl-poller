@@ -766,7 +766,7 @@ def poll_user(user):
             return None, portal_token
         # Check in-memory cache first — avoids a DB read every 200ms cycle.
         tok = portal_token or get_portal_token_mem(bot_id, telegram_id)
-        if not tok and has_portal_creds:
+        if not tok and bool(email and password):
             tok = _ensure_portal_token(bot_id, telegram_id, email, password)
             if tok:
                 set_portal_token_mem(bot_id, telegram_id, tok)
