@@ -332,9 +332,19 @@ def poll_user(user):
                     portal_password=password,
                     filters=filters,  # contains __endtime_formulas__ for end_dt pre-computation
                 )
-            # Cache not ready yet — skip this cycle entirely to avoid accepting
-            # offers without the conflict filter in place.
-            return f"Done with user {telegram_id} (rides cache init pending)"
+                # Cache not ready yet — skip this cycle to avoid accepting
+                # offers before the conflict filter is populated.
+                return f"Done with user {telegram_id} (rides cache init pending)"
+            else:
+                # No P1 token: initialize cache with empty dict so the poller
+                # is never permanently stuck. Rides will be loaded on next refresh.
+                _poll_log(
+                    f"⚠️ RIDES INIT [{bot_id}/{telegram_id}] "
+                    f"pas de token P1 — cache initialisé vide (filtres désactivés)"
+                )
+                from .state import set_rides_fetched as _set_rides_fetched
+                _set_rides_fetched(bot_id, telegram_id, {})
+
         else:
             # Periodic refresh: re-fetch from API if cache is older than RIDES_REFRESH_INTERVAL_S
             age_s = get_rides_cache_age_s(bot_id, telegram_id)
