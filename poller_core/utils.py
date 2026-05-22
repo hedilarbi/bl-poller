@@ -245,16 +245,32 @@ def _compute_ends_at(offer: dict, filters: dict, pickup_dt: datetime, tz_name: s
     otype = (rid.get("type") or "").lower()
 
     if otype == "hourly":
+        _SAFETY_BUFFER_MIN = 120.0  # +2h safety margin always added for hourly
         dur_min = _duration_minutes_from_rid(rid)
         if dur_min:
-            ends_at = pickup_dt + timedelta(minutes=float(dur_min))
+            total_min = float(dur_min) + _SAFETY_BUFFER_MIN
+            ends_at = pickup_dt + timedelta(minutes=total_min)
             if DEBUG_ENDS:
-                _log(f"ENDSAT[hourly]: pickup={pickup_dt.isoformat()} + {dur_min:.1f}min = {ends_at.isoformat()}")
+                _log(
+                    f"ENDSAT[hourly]: pickup={pickup_dt.isoformat()} + {dur_min:.1f}min"
+                    f" + {_SAFETY_BUFFER_MIN:.0f}min_safety = {ends_at.isoformat()}"
+                )
             return ends_at.isoformat(), {
                 "duration_minutes": float(dur_min),
-                "formula": "pickup + durationMinutes",
+                "safety_buffer_minutes": _SAFETY_BUFFER_MIN,
+                "total_minutes": total_min,
+                "formula": "pickup + durationMinutes + 2h_safety",
             }
-        return None, None
+        # Fallback: API didn't return any duration → use 2h safety buffer alone
+        ends_at = pickup_dt + timedelta(minutes=_SAFETY_BUFFER_MIN)
+        if DEBUG_ENDS:
+            _log(f"ENDSAT[hourly:fallback]: pickup={pickup_dt.isoformat()} + {_SAFETY_BUFFER_MIN:.0f}min_safety = {ends_at.isoformat()}")
+        return ends_at.isoformat(), {
+            "duration_minutes": None,
+            "safety_buffer_minutes": _SAFETY_BUFFER_MIN,
+            "total_minutes": _SAFETY_BUFFER_MIN,
+            "formula": "pickup + 2h_safety_fallback (no duration from API)",
+        }
 
     if otype == "transfer":
         dist_m = rid.get("estimatedDistanceMeters")
