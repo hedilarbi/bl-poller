@@ -1074,7 +1074,6 @@ def _process_offers_for_user(
         # Accepted candidate — fire-and-forget reserve.
         # The poll cycle does NOT block waiting for the reserve HTTP response.
         # A callback (_on_reserve_done) handles the result asynchronously.
-        from .utils import _compute_ends_at
         predicted_end = _compute_ends_at(offer, filters, tz_name) or parse_iso_dt_or_none((offer.get("rides") or [{}])[0].get("endsAt"))
 
         offer_key = f"{platform}:{oid}" if oid else None

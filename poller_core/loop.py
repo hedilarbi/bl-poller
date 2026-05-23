@@ -355,6 +355,9 @@ def poll_user(user):
                         f"🔄 Rides cache stale ({age_s:.0f}s >= {RIDES_REFRESH_INTERVAL_S}s) "
                         f"for {bot_id}/{telegram_id} — refreshing"
                     )
+                    # Touch timestamp NOW so parallel cycles don't trigger a duplicate refresh
+                    from .state import touch_rides_cache_ts as _touch_rides_ts
+                    _touch_rides_ts(bot_id, telegram_id)
                     from .processing import _refresh_rides_cache_async
                     _refresh_rides_cache_async(
                         bot_id,
@@ -369,6 +372,7 @@ def poll_user(user):
                         filters=filters,  # contains __endtime_formulas__ for end_dt pre-computation
                     )
         accepted_intervals = cached_intervals or []
+
 
     # Gate P1 only — P2 still polls independently even when P1 is in cooldown or
     # has an invalid token, so offers on Athena are never silently missed.

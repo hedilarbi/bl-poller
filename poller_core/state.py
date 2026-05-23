@@ -168,6 +168,14 @@ def invalidate_rides_cache(bot_id: str, telegram_id: int):
     _rides_cache.pop((str(bot_id), int(telegram_id)), None)
 
 
+def touch_rides_cache_ts(bot_id: str, telegram_id: int):
+    """Reset last_fetch to now so the stale check doesn't fire again for RIDES_REFRESH_INTERVAL_S."""
+    key = (str(bot_id), int(telegram_id))
+    entry = _rides_cache.get(key)
+    if entry and entry.get("fetched"):
+        entry["last_fetch"] = time.time()
+
+
 def get_user_runtime_cache(bot_id: str, telegram_id: int, cache_version: int):
     entry = _user_runtime_cache.get((bot_id, telegram_id))
     if not entry:
