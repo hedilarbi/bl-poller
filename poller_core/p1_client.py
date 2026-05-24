@@ -313,7 +313,7 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
     params = {
         "order_by": "ASC",
         "page": 1,
-        "page_size": 30,
+        "page_size": 100,
         "sort_by": "start_time",
     }
     try:
