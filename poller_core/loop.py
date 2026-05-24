@@ -472,13 +472,6 @@ def poll_user(user):
     def _fetch_p1_offers_real():
         nonlocal token, mobile_headers
         if _p1_in_cooldown:
-            # Log cooldown at most once per minute to avoid spam
-            _cd_key = ("p1_cooldown_log", str(bot_id), int(telegram_id))
-            _now_cd = time.time()
-            if _now_cd - _p1_cooldown_last_log.get(_cd_key, 0.0) >= 60:
-                _p1_cooldown_last_log[_cd_key] = _now_cd
-                _until = _p1_skip_until.get((str(bot_id), int(telegram_id)), 0.0)
-                _poll_log(f"⏳ [P1] [{bot_id}] en cooldown — représente dans {max(0, int(_until - _now_cd))}s")
             return []
         if not token or not str(token).strip():
             # No token at all — try auto-refresh before giving up.
@@ -531,8 +524,6 @@ def poll_user(user):
         status_code, results = get_offers_p1(token, headers=mobile_headers)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         observe_ms("p1_fetch_ms", elapsed_ms)
-        n_offers = len(results) if isinstance(results, list) else 0
-        _poll_log(f"📡 [P1] [{bot_id}] status={status_code} | offers={n_offers} | {elapsed_ms}ms")
         if status_code in (401, 403):
             _fail_key = (str(bot_id), int(telegram_id))
             _now_fail = time.time()
