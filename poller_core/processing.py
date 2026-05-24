@@ -383,8 +383,9 @@ def _log_offer_decision_async(
     def _job():
         try:
             log_offer_decision(bot_id, telegram_id, offer, status, reason, notify_text=notify_text)
-        except Exception:
-            pass
+        except Exception as _e:
+            from .loop import _poll_log
+            _poll_log(f"⚠️ [STATS] log_offer_decision failed for {bot_id}/{telegram_id} [{status}]: {_e}")
 
     _db_executor.submit(_job)
 
