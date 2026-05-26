@@ -105,7 +105,7 @@ def warmup_p1_reserve_connection(token: str, headers: Optional[dict] = None):
         sess.request(
             "GET",
             f"{API_HOST}/api/v1/chauffeur/offers",
-            params={"order_by": "ASC", "page": 1, "page_size": 1, "sort_by": "start_time"},
+            params={"sort_order": "ASC", "page": 1, "page_size": 1, "sort_by": "start_time"},
             headers=hdrs,
             timeout=max(3, int(P1_POLL_TIMEOUT_S)),
         )
@@ -311,7 +311,7 @@ def get_rides_p1(token: str, headers: Optional[dict] = None) -> Tuple[Optional[i
 def get_offers_p1(token: str, headers: Optional[dict] = None):
     headers = _merge_headers(token, headers)
     params = {
-        "order_by": "ASC",
+        "sort_order": "ASC",
         "page": 1,
         "page_size": 100,
         "sort_by": "start_time",

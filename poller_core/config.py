@@ -46,7 +46,7 @@ P1_STRIP_VOLATILE_HEADERS = os.getenv("P1_STRIP_VOLATILE_HEADERS", "1") == "1"
 P1_FORCE_FRESH_REQUEST_IDS = os.getenv("P1_FORCE_FRESH_REQUEST_IDS", "1") == "1"
 P1_USER_AGENT = os.getenv(
     "P1_USER_AGENT",
-    "Chauffeur/24531 CFNetwork/3860.300.31 Darwin/25.2.0",
+    "Chauffeur/26282 CFNetwork/3860.400.51 Darwin/25.3.0",
 )
 P1_ENABLE_RUM_HEADERS = os.getenv("P1_ENABLE_RUM_HEADERS", "1") == "1"
 
