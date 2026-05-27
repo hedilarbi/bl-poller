@@ -130,6 +130,9 @@ _playwright_lock = threading.Lock()
 _p1_skip_until: Dict[Tuple[str, int], float] = {}
 # Throttle for P1 cooldown log: records last time the cooldown message was printed per user.
 _p1_cooldown_last_log: Dict[tuple, float] = {}
+# Throttle for P1 poll-result log (status + offer count) — once per 60s per user.
+_p1_poll_last_log: Dict[tuple, float] = {}
+_P1_POLL_LOG_INTERVAL_S = 60.0
 # P2 presence tracking: offer IDs currently visible in Athena per user.
 # An offer is processed only when it first appears; re-processed only after it disappears and comes back.
 _p2_active_offers: Dict[Tuple[str, int], Set[str]] = {}
@@ -625,6 +628,15 @@ def poll_user(user):
                 unpin_warning_if_any(bot_id, telegram_id, "no_token")
                 set_token_ok_mem(bot_id, telegram_id, cache_version)
             offers = results or []
+            # Rate-limited monitoring: log P1 poll result once per minute
+            _p1_poll_key = (str(bot_id), int(telegram_id))
+            _now_log = time.time()
+            if _now_log - _p1_poll_last_log.get(_p1_poll_key, 0.0) >= _P1_POLL_LOG_INTERVAL_S:
+                _poll_log(
+                    f"🛰️ P1 [{bot_id}] poll OK | {elapsed_ms}ms | "
+                    f"offers_found={len(offers)}"
+                )
+                _p1_poll_last_log[_p1_poll_key] = _now_log
             _log_offers_found("P1", telegram_id, offers)
             return offers
         _log_p1_non_200(bot_id, status_code, results)

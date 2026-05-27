@@ -331,9 +331,33 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
             body = r.text
 
         if r.status_code == 200 and isinstance(body, dict):
-            results = body.get("results", []) or []
-            if results and LOG_RAW_API_RESPONSES:
+            # API v26282+ returns offers under "items" (was "results" in older versions).
+            # Try both + fallbacks so a future rename doesn't silently break polling.
+            results = None
+            for _key in ("items", "results", "data", "offers"):
+                _val = body.get(_key)
+                if isinstance(_val, list):
+                    results = _val
+                    if _key not in ("items", "results"):
+                        _builtins.print(
+                            f"[{datetime.now()}] ⚠️ P1 response key changed: "
+                            f"found offers under '{_key}'"
+                        )
+                    break
+            if results is None:
+                results = []
+
+            if not results:
+                # Always log when 200 but empty — critical for diagnosing API changes.
+                _body_keys = list(body.keys()) if isinstance(body, dict) else type(body).__name__
+                _body_preview = str(body)[:300]
+                _builtins.print(
+                    f"[{datetime.now()}] 🔍 P1 200 but 0 offers | "
+                    f"response_keys={_body_keys} | preview={_body_preview}"
+                )
+            elif LOG_RAW_API_RESPONSES:
                 _builtins.print(f"[{datetime.now()}] 🛰️ P1 poll /api/v1/chauffeur/offers full response -> {raw_text}")
+
             for it in results:
                 try:
                     it["_platform"] = "p1"
@@ -342,6 +366,10 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
             return 200, results
 
         if r.status_code == 200:
+            _builtins.print(
+                f"[{datetime.now()}] 🔍 P1 200 but body is not a dict | "
+                f"type={type(body).__name__} | preview={str(body)[:200]}"
+            )
             return 200, []
 
         # return status + body for diagnostics (401/403/etc)
