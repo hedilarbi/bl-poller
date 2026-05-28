@@ -343,6 +343,7 @@ async def _playwright_pkce_login(email: str, password: str) -> Tuple[bool, Optio
     )
 
     code_holder: dict = {}
+    screenshot_path: dict = {}
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -372,13 +373,22 @@ async def _playwright_pkce_login(email: str, password: str) -> Tuple[bool, Optio
             )
             page = await context.new_page()
 
-            async def _on_request(request):
-                if request.url.startswith("com.blacklane"):
-                    m = re.search(r"[?&]code=([^&]+)", request.url)
+            def _extract_code_from_url(url: str):
+                if url.startswith("com.blacklane"):
+                    m = re.search(r"[?&]code=([^&]+)", url)
                     if m:
                         code_holder["code"] = m.group(1)
 
+            async def _on_request(request):
+                _extract_code_from_url(request.url)
+
+            # Also catch JS-driven redirects (window.location = ...) via framenavigated
+            async def _on_framenavigated(frame):
+                _extract_code_from_url(frame.url)
+
             page.on("request", _on_request)
+            page.on("framenavigated", _on_framenavigated)
+
             await page.goto(authorize_url)
             # Randomise typing and submission delays to avoid fixed-interval bot signatures
             await page.wait_for_timeout(int(800 + secrets.randbelow(600)))
@@ -391,12 +401,35 @@ async def _playwright_pkce_login(email: str, password: str) -> Tuple[bool, Optio
                 await page.wait_for_timeout(int(3000 + secrets.randbelow(2000)))
             except Exception:
                 pass
+
+            # If no code yet, save a screenshot so we can diagnose what the browser sees
+            if not code_holder.get("code"):
+                try:
+                    import os as _os
+                    _snap_dir = "/tmp/bl_playwright"
+                    _os.makedirs(_snap_dir, exist_ok=True)
+                    _snap = f"{_snap_dir}/login_fail_{int(time.time())}.png"
+                    await page.screenshot(path=_snap, full_page=True)
+                    screenshot_path["path"] = _snap
+                    # Also capture the current URL and page title for diagnosis
+                    screenshot_path["url"] = page.url
+                    screenshot_path["title"] = await page.title()
+                except Exception:
+                    pass
+
             await browser.close()
     except Exception as e:
         return False, None, None, f"playwright_browser:{type(e).__name__}"
 
     code = code_holder.get("code")
     if not code:
+        _snap = screenshot_path.get("path", "n/a")
+        _url = screenshot_path.get("url", "n/a")
+        _title = screenshot_path.get("title", "n/a")
+        _builtins.print(
+            f"[{datetime.now()}] ❌ Playwright no_code_captured | "
+            f"page_url={_url} | page_title={_title!r} | screenshot={_snap}"
+        )
         return False, None, None, "playwright:no_code_captured"
 
     try:

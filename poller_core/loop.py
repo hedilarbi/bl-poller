@@ -87,7 +87,6 @@ from db import (
     get_bl_account_full,
     get_mobile_headers,
     get_token_auto_refresh,
-    set_token_auto_refresh,
 )
 
 
@@ -117,6 +116,8 @@ _P1_FAIL_COUNT_TTL_S = 120.0   # entries older than 2 min are stale
 # the mode is disabled and the user is notified to update manually.
 _auto_refresh_fail_counts: Dict[Tuple[str, int], int] = {}
 _AUTO_REFRESH_FAIL_THRESHOLD = 3
+_AR_COOLDOWN_S = 3600.0  # 1h cooldown after 3 consecutive failures before retrying
+_ar_cooldown_until: Dict[Tuple[str, int], float] = {}  # replaces permanent DB disable
 # Minimum seconds between two Playwright re-login attempts for the same user.
 # Prevents hammering Blacklane login with rapid retries when the session is broken.
 _ar_last_attempt: Dict[Tuple[str, int], float] = {}
@@ -480,6 +481,10 @@ def poll_user(user):
             # No token at all — try auto-refresh before giving up.
             _ar_key = (str(bot_id), int(telegram_id))
             _auto_refresh = get_token_auto_refresh(str(bot_id), int(telegram_id))
+            # Check in-memory cooldown (replaces the permanent DB disable)
+            _ar_cooldown_exp = _ar_cooldown_until.get(_ar_key, 0.0)
+            if _ar_cooldown_exp > time.time():
+                return []
             _poll_log(f"🔍 [P1] [{bot_id}] no token: auto_refresh={_auto_refresh} email={'SET' if email else 'MISSING'} pwd={'SET' if password else 'MISSING'}")
             if _auto_refresh and email and password:
                 _last = _ar_last_attempt.get(_ar_key, 0.0)
@@ -503,6 +508,7 @@ def poll_user(user):
                         save_playwright_p1_token(bot_id, telegram_id, new_token, new_refresh, mobile_headers)
                         token = new_token
                         _auto_refresh_fail_counts.pop(_ar_key, None)
+                        _ar_cooldown_until.pop(_ar_key, None)
                         _ar_last_attempt.pop(_ar_key, None)
                         _p1_skip_until.pop(_ar_key, None)
                         set_token_status(bot_id, telegram_id, "valid")
@@ -516,9 +522,14 @@ def poll_user(user):
                 _ar_n = _auto_refresh_fail_counts.get(_ar_key, 0) + 1
                 _auto_refresh_fail_counts[_ar_key] = _ar_n
                 if _ar_n >= _AUTO_REFRESH_FAIL_THRESHOLD:
-                    set_token_auto_refresh(str(bot_id), int(telegram_id), False)
+                    # Enter 1h cooldown instead of permanently disabling auto-refresh.
+                    _ar_cooldown_until[_ar_key] = time.time() + _AR_COOLDOWN_S
                     _auto_refresh_fail_counts.pop(_ar_key, None)
-                    _poll_log(f"❌ [AUTO-REFRESH] [{bot_id}] Disabled after {_AUTO_REFRESH_FAIL_THRESHOLD} failures")
+                    _ar_last_attempt.pop(_ar_key, None)
+                    _poll_log(
+                        f"⏳ [AUTO-REFRESH] [{bot_id}] {_AUTO_REFRESH_FAIL_THRESHOLD} failures — "
+                        f"cooldown {int(_AR_COOLDOWN_S // 60)}min, will retry automatically"
+                    )
                     _set_token_problem("no_token")
                 return []
             _set_token_problem("no_token")
@@ -605,10 +616,14 @@ def poll_user(user):
                 _ar_n = _auto_refresh_fail_counts.get(_ar_key, 0) + 1
                 _auto_refresh_fail_counts[_ar_key] = _ar_n
                 if _ar_n >= _AUTO_REFRESH_FAIL_THRESHOLD:
-                    # Disable auto-refresh and notify user with pinned warning
-                    set_token_auto_refresh(str(bot_id), int(telegram_id), False)
+                    # Enter 1h cooldown instead of permanently disabling auto-refresh.
+                    _ar_cooldown_until[_ar_key] = time.time() + _AR_COOLDOWN_S
                     _auto_refresh_fail_counts.pop(_ar_key, None)
-                    _poll_log(f"❌ [AUTO-REFRESH] [{bot_id}] Disabled after {_AUTO_REFRESH_FAIL_THRESHOLD} consecutive failures")
+                    _ar_last_attempt.pop(_ar_key, None)
+                    _poll_log(
+                        f"⏳ [AUTO-REFRESH] [{bot_id}] {_AUTO_REFRESH_FAIL_THRESHOLD} failures — "
+                        f"cooldown {int(_AR_COOLDOWN_S // 60)}min, will retry automatically"
+                    )
                     _set_token_problem("expired")
                 else:
                     # Let polling continue so another attempt can be made
