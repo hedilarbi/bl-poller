@@ -1,7 +1,5 @@
 import json
 import time
-import random
-import traceback
 import threading
 import builtins as _builtins
 from typing import Optional, List, Tuple, Dict, Set
@@ -25,8 +23,6 @@ from .config import (
     BURST_POLL_INTERVAL_S,
     BURST_DURATION_S,
     MAX_WORKERS,
-    LOG_OFFERS_PAYLOAD,
-    MAX_LOGGED_OFFERS,
     OFFER_MEMORY_DEDUPE,
     ATHENA_USE_OFFERS_ETAG,
     RIDES_REFRESH_INTERVAL_S,
@@ -37,7 +33,6 @@ from .state import (
     get_rides_intervals,
     get_rides_cache_age_s,
     maybe_cleanup_rides,
-    invalidate_rides_cache,
     get_offers_etag,
     set_offers_etag,
     get_user_runtime_cache,
@@ -131,9 +126,6 @@ _playwright_lock = threading.Lock()
 _p1_skip_until: Dict[Tuple[str, int], float] = {}
 # Throttle for P1 cooldown log: records last time the cooldown message was printed per user.
 _p1_cooldown_last_log: Dict[tuple, float] = {}
-# Throttle for P1 poll-result log (status + offer count) — once per 60s per user.
-_p1_poll_last_log: Dict[tuple, float] = {}
-_P1_POLL_LOG_INTERVAL_S = 60.0
 # P2 presence tracking: offer IDs currently visible in Athena per user.
 # An offer is processed only when it first appears; re-processed only after it disappears and comes back.
 _p2_active_offers: Dict[Tuple[str, int], Set[str]] = {}
@@ -643,15 +635,6 @@ def poll_user(user):
                 unpin_warning_if_any(bot_id, telegram_id, "no_token")
                 set_token_ok_mem(bot_id, telegram_id, cache_version)
             offers = results or []
-            # Log only when offers are found — no noise when queue is empty.
-            _p1_poll_key = (str(bot_id), int(telegram_id))
-            _now_log = time.time()
-            if offers:
-                _poll_log(
-                    f"🛰️ P1 [{bot_id}] poll OK | {elapsed_ms}ms | "
-                    f"offers_found={len(offers)}"
-                )
-                _p1_poll_last_log[_p1_poll_key] = _now_log
             _log_offers_found("P1", telegram_id, offers)
             return offers
         _log_p1_non_200(bot_id, status_code, results)

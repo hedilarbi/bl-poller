@@ -720,8 +720,10 @@ def _process_offers_for_user(
         platform = offer.get("_platform", "p1")
         # Skip offers currently being reserved (fire-and-forget in flight)
         if oid and is_pending_reserve(f"{platform}:{oid}"):
+            _builtins.print(f"[{datetime.now()}] ⏳ [{platform.upper()}] {oid} — reserve en cours, skip")
             continue
         if oid and is_recent_not_valid(bot_id, telegram_id, platform, str(oid), cache_version=cache_version):
+            _builtins.print(f"[{datetime.now()}] ⏭️ [{platform.upper()}] {oid} — deja traite (not_valid 60s), skip")
             continue
 
         # Optional memory dedupe; disabled in race mode to avoid missing reused offer ids.
