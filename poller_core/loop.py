@@ -628,10 +628,10 @@ def poll_user(user):
                 unpin_warning_if_any(bot_id, telegram_id, "no_token")
                 set_token_ok_mem(bot_id, telegram_id, cache_version)
             offers = results or []
-            # Rate-limited monitoring: log P1 poll result once per minute
+            # Log only when offers are found — no noise when queue is empty.
             _p1_poll_key = (str(bot_id), int(telegram_id))
             _now_log = time.time()
-            if _now_log - _p1_poll_last_log.get(_p1_poll_key, 0.0) >= _P1_POLL_LOG_INTERVAL_S:
+            if offers:
                 _poll_log(
                     f"🛰️ P1 [{bot_id}] poll OK | {elapsed_ms}ms | "
                     f"offers_found={len(offers)}"
