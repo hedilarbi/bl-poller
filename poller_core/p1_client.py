@@ -6,15 +6,12 @@ import time
 import uuid
 import threading
 import requests
-import builtins as _builtins
 from typing import Optional, Tuple
-from datetime import datetime
 
 from .config import (
     API_HOST,
     P1_POLL_TIMEOUT_S,
     P1_RESERVE_TIMEOUT_S,
-    LOG_RAW_API_RESPONSES,
     P1_STRIP_VOLATILE_HEADERS,
     P1_FORCE_FRESH_REQUEST_IDS,
     P1_USER_AGENT,
@@ -324,7 +321,6 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
             params=params,
             timeout=P1_POLL_TIMEOUT_S,
         )
-        raw_text = r.text if LOG_RAW_API_RESPONSES else None
         try:
             body = r.json()
         except Exception:
@@ -338,17 +334,10 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
                 _val = body.get(_key)
                 if isinstance(_val, list):
                     results = _val
-                    if _key not in ("items", "results"):
-                        _builtins.print(
-                            f"[{datetime.now()}] ⚠️ P1 response key changed: "
-                            f"found offers under '{_key}'"
-                        )
                     break
             if results is None:
                 results = []
 
-            if results and LOG_RAW_API_RESPONSES:
-                _builtins.print(f"[{datetime.now()}] 🛰️ P1 poll /api/v1/chauffeur/offers full response -> {raw_text}")
 
             for it in results:
                 try:

@@ -2,7 +2,6 @@ import base64
 import json
 import secrets
 import threading
-import builtins as _builtins
 from typing import Optional, Tuple
 from datetime import datetime
 import requests
@@ -13,10 +12,8 @@ from .config import (
     PORTAL_CLIENT_ID,
     PORTAL_PAGE_SIZE,
     ATHENA_RELOGIN_SKEW_S,
-    ATHENA_PRINT_DEBUG,
     P2_POLL_TIMEOUT_S,
     P2_RESERVE_TIMEOUT_S,
-    LOG_RAW_API_RESPONSES,
     HTTP_POOL_SIZE,
     P2_PORTAL_USER_AGENT,
     P2_USER_ROLES,
@@ -485,15 +482,12 @@ def _partner_get_offers(
         headers["If-None-Match"] = etag
     try:
         r = _session_request("GET", url, headers=headers, timeout=P2_POLL_TIMEOUT_S)
-        raw_text = r.text if LOG_RAW_API_RESPONSES else None
         new_etag = r.headers.get("etag") or r.headers.get("ETag")
         if r.status_code == 304:
             return 304, None, new_etag
         if 200 <= r.status_code < 300:
             try:
                 payload = r.json()
-                if LOG_RAW_API_RESPONSES and isinstance(payload, dict) and (payload.get("items") or []):
-                    _builtins.print(f"[{datetime.now()}] 🛰️ P2 poll /api/v1/chauffeur/offers full response -> {raw_text}")
                 if isinstance(payload, dict) and new_etag:
                     payload["__etag"] = new_etag
                 return r.status_code, payload, new_etag
@@ -574,8 +568,6 @@ def _ensure_portal_token(bot_id: str, telegram_id: int, email: str, password: st
         if ok and new_tok:
             update_portal_token(bot_id, telegram_id, new_tok)
             portal_token = new_tok
-            if ATHENA_PRINT_DEBUG:
-                print(f"[{datetime.now()}] 🔐 Athena login OK for user {telegram_id}.")
         else:
             print(f"[{datetime.now()}] ❌ Portal login failed for user {telegram_id}: {note}")
             portal_token = None
@@ -607,15 +599,12 @@ def _athena_get_offers(
         headers["If-None-Match"] = etag
     try:
         r = _session_request("GET", url, headers=headers, timeout=P2_POLL_TIMEOUT_S)
-        raw_text = r.text if LOG_RAW_API_RESPONSES else None
         new_etag = r.headers.get("etag") or r.headers.get("ETag")
         if r.status_code == 304:
             return 304, None, new_etag
         if 200 <= r.status_code < 300:
             try:
                 payload = r.json()
-                if LOG_RAW_API_RESPONSES and isinstance(payload, dict) and (payload.get("data") or []):
-                    _builtins.print(f"[{datetime.now()}] 🛰️ P2 poll /hades/offers full response -> {raw_text}")
                 if isinstance(payload, dict) and new_etag:
                     payload["__etag"] = new_etag
                 return r.status_code, payload, new_etag

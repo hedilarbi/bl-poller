@@ -33,7 +33,6 @@ def _resolve_bot_token(bot_id: str, telegram_id: int) -> Optional[str]:
     if tok:
         return tok
     if BOT_TOKEN:
-        print(f"[{datetime.now()}] ⚠️ Falling back to BOT_TOKEN for {bot_id}/{telegram_id} (no bot mapping).")
         return BOT_TOKEN
     print(f"[{datetime.now()}] ❌ No bot token for {bot_id}/{telegram_id}; cannot send Telegram messages.")
     return None
@@ -145,7 +144,6 @@ def tg_send_message(
         resp = getattr(e, "response", None)
         status = int(getattr(resp, "status_code", 0) or 0)
         if _is_html_parse_error(resp):
-            print(f"[{datetime.now()}] ⚠️ Falling back to plain text due to HTML parse error: {e}")
             plain = _strip_html_tags(text)
             first_id = None
             for i, ch in enumerate(_split_chunks(plain, 4096)):

@@ -248,10 +248,8 @@ def poll_user(user):
         cache_version = 0
 
     if not bot_admin_active:
-        print(f"[{datetime.now()}] ⏩ Skipping inactive bot {bot_id} (admin inactive)")
         return
     if not active:
-        print(f"[{datetime.now()}] ⏩ Skipping inactive user {telegram_id}")
         return
 
     runtime_cached = get_user_runtime_cache(bot_id, telegram_id, cache_version)
@@ -336,10 +334,6 @@ def poll_user(user):
             else:
                 # No P1 token: initialize cache with empty dict so the poller
                 # is never permanently stuck. Rides will be loaded on next refresh.
-                _poll_log(
-                    f"⚠️ RIDES INIT [{bot_id}/{telegram_id}] "
-                    f"pas de token P1 — cache initialisé vide (filtres désactivés)"
-                )
                 from .state import set_rides_fetched as _set_rides_fetched
                 _set_rides_fetched(bot_id, telegram_id, {})
 
@@ -349,10 +343,6 @@ def poll_user(user):
             if age_s is not None and age_s >= RIDES_REFRESH_INTERVAL_S:
                 p1_ref_token = token if (token and str(token).strip()) else None
                 if p1_ref_token:
-                    _poll_log(
-                        f"🔄 Rides cache stale ({age_s:.0f}s >= {RIDES_REFRESH_INTERVAL_S}s) "
-                        f"for {bot_id}/{telegram_id} — refreshing"
-                    )
                     # Touch timestamp NOW so parallel cycles don't trigger a duplicate refresh
                     from .state import touch_rides_cache_ts as _touch_rides_ts
                     _touch_rides_ts(bot_id, telegram_id)
@@ -477,7 +467,6 @@ def poll_user(user):
             _ar_cooldown_exp = _ar_cooldown_until.get(_ar_key, 0.0)
             if _ar_cooldown_exp > time.time():
                 return []
-            _poll_log(f"🔍 [P1] [{bot_id}] no token: auto_refresh={_auto_refresh} email={'SET' if email else 'MISSING'} pwd={'SET' if password else 'MISSING'}")
             if _auto_refresh and email and password:
                 _last = _ar_last_attempt.get(_ar_key, 0.0)
                 _now_t = time.time()
@@ -487,7 +476,6 @@ def poll_user(user):
                 _poll_log(f"⚠️ [AUTO-REFRESH] [{bot_id}] No token — triggering Playwright login")
                 _ar_last_attempt[_ar_key] = _now_t
                 if not _playwright_lock.acquire(blocking=False):
-                    _poll_log(f"⏸ [AUTO-REFRESH] [{bot_id}] Playwright busy — will retry next cycle")
                     _ar_last_attempt.pop(_ar_key, None)
                     return []
                 try:
@@ -566,7 +554,6 @@ def poll_user(user):
                 # Serialize Playwright: only one browser session per process at a time.
                 # Concurrent sessions from the same IP amplify abuse detection signals.
                 if not _playwright_lock.acquire(blocking=False):
-                    _poll_log(f"⏸ [AUTO-REFRESH] [{bot_id}] Playwright busy — will retry next cycle")
                     _ar_last_attempt.pop(_ar_key, None)  # don't burn the attempt slot
                     _p1_fail_counts.pop(_fail_key, None)
                     return []
@@ -596,7 +583,6 @@ def poll_user(user):
                         # Verification timed out (network error, not an auth rejection).
                         # The Playwright token is fresh and likely valid — save it and
                         # let the next cycle confirm.
-                        _poll_log(f"⚠️ [AUTO-REFRESH] [{bot_id}] P1 verification timed out — saving new token, will confirm next cycle")
                         save_playwright_p1_token(bot_id, telegram_id, new_token, new_refresh, mobile_headers)
                         token = new_token
                         _p1_fail_counts.pop(_fail_key, None)
@@ -612,10 +598,6 @@ def poll_user(user):
                     _ar_cooldown_until[_ar_key] = time.time() + _AR_COOLDOWN_S
                     _auto_refresh_fail_counts.pop(_ar_key, None)
                     _ar_last_attempt.pop(_ar_key, None)
-                    _poll_log(
-                        f"⏳ [AUTO-REFRESH] [{bot_id}] {_AUTO_REFRESH_FAIL_THRESHOLD} failures — "
-                        f"cooldown {int(_AR_COOLDOWN_S // 60)}min, will retry automatically"
-                    )
                     _set_token_problem("expired")
                 else:
                     # Let polling continue so another attempt can be made
@@ -981,7 +963,6 @@ def _warmup_reserve_connections_async():
 
 def run():
     init_db()
-    _poll_log("🚀 Poller started")
     cycle_idx = 0
 
     _CLEANUP_CYCLE_EVERY = 200   # cleanup not_valid cache every ~20s at 300ms poll

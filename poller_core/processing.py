@@ -12,7 +12,6 @@ from dateutil.tz import gettz
 
 from .config import (
     DEBUG_PRINT_OFFERS,
-    DEBUG_ENDS,
     AUTO_RESERVE_ENABLED,
     FAST_ACCEPT_MODE,
     FAST_ACCEPT_NOTIFY_REJECTED,
@@ -27,7 +26,6 @@ from .utils import (
     _fmt_dt_local_from_dt,
     _duration_minutes_from_rid,
     _compute_ends_at,
-    _fmt_local_iso,
     _extract_addr,
     _parse_user_slot_local,
     _parse_hhmm,
@@ -40,7 +38,7 @@ from .filters import (
     _find_conflict,
 )
 from .notify import maybe_send_message, _platform_icon
-from .offer_coordinator import register_candidate, claim_offer, is_claimed_by_peer
+from .offer_coordinator import register_candidate, claim_offer
 from .state import (
     accepted_per_user,
     rejected_per_user,
@@ -53,9 +51,7 @@ from .state import (
 )
 from .p1_client import get_rides_p1, reserve_offer_p1
 from .p2_client import (
-    _athena_get_rides,
     _filter_rides_by_bl_uuid,
-    _ensure_portal_token,
     reserve_offer_p2,
 )
 from .rides import _extract_intervals_from_rides
@@ -633,26 +629,6 @@ def _build_reject_summary_lines(filter_results: List[dict]) -> str:
 def debug_print_offers(telegram_id: int, offers: list):
     if not DEBUG_PRINT_OFFERS:
         return
-    print(f"[{datetime.now()}] 📥 Received {len(offers)} offer(s) for user {telegram_id}")
-    for idx, offer in enumerate(offers, start=1):
-        rid = (offer.get("rides") or [{}])[0]
-        oid = offer.get("id")
-        otype = (rid.get("type") or "—")
-        vclass = (offer.get("vehicleClass") or "—")
-        price = offer.get("price")
-        currency = offer.get("currency") or ""
-        pickup = rid.get("pickupTime")
-        pu = _extract_addr(rid.get("pickUpLocation"))
-        do = _extract_addr(rid.get("dropOffLocation")) if rid.get("dropOffLocation") else "—"
-        plat = offer.get("_platform")
-        print(
-            f"[{datetime.now()}] 🧾 Offer {idx} [{plat}]: id={oid} • type={otype} • class={vclass} • "
-            f"price={price} {currency} • pickup={pickup} • PU='{pu}' • DO='{do}'"
-        )
-        try:
-            print(json.dumps(offer, indent=2, ensure_ascii=False))
-        except Exception:
-            print(str(offer))
 
 
 def _process_offers_for_user(
@@ -688,11 +664,6 @@ def _process_offers_for_user(
     ):
         pending_notifications.append((kind, text, platform_name, reply_markup, force_notify))
 
-    if user_cfilters:
-        slugs = ", ".join(sorted(user_cfilters.keys()))
-        print(f"[{datetime.now()}] 🧩 Custom filters for {bot_id}/{telegram_id}: {slugs}")
-    else:
-        print(f"[{datetime.now()}] 🧩 Custom filters for {bot_id}/{telegram_id}: none")
 
     _now_cleanup = time.monotonic()
     if _now_cleanup - _reserve_cleanup_state["ts"] >= _RESERVE_CLEANUP_INTERVAL_S:
@@ -720,10 +691,8 @@ def _process_offers_for_user(
         platform = offer.get("_platform", "p1")
         # Skip offers currently being reserved (fire-and-forget in flight)
         if oid and is_pending_reserve(f"{platform}:{oid}"):
-            _builtins.print(f"[{datetime.now()}] ⏳ [{platform.upper()}] {oid} — reserve en cours, skip")
             continue
         if oid and is_recent_not_valid(bot_id, telegram_id, platform, str(oid), cache_version=cache_version):
-            _builtins.print(f"[{datetime.now()}] ⏭️ [{platform.upper()}] {oid} — deja traite (not_valid 60s), skip")
             continue
 
         # Optional memory dedupe; disabled in race mode to avoid missing reused offer ids.
@@ -731,7 +700,6 @@ def _process_offers_for_user(
             oid in accepted_per_user[bot_id][telegram_id]
             or oid in rejected_per_user[bot_id][telegram_id][platform]
         ):
-            print(f"[{datetime.now()}] ⏭️ Skipping offer {oid} for user {telegram_id} – already processed (memory).")
             continue
 
         rid = (offer.get("rides") or [{}])[0]
@@ -746,13 +714,6 @@ def _process_offers_for_user(
             continue
 
         _price_disp = f"{offer.get('price')} {offer.get('currency','')}"
-        _pu_disp = _extract_addr(rid.get("pickUpLocation")) or "?"
-        _do_disp = _extract_addr(rid.get("dropOffLocation")) if rid.get("dropOffLocation") else "?"
-        _poll_age_ms = int((time.time() - float(offer["_poll_ts"])) * 1000) if offer.get("_poll_ts") else "?"
-        _builtins.print(
-            f"[{datetime.now()}] 🔔 [{platform.upper()}] Offer {oid} | {_price_disp} | "
-            f"class={raw_vc} | poll_age={_poll_age_ms}ms | PU={_pu_disp!r} DO={_do_disp!r}"
-        )
 
         # Compute endsAt using formulas or duration
         ends_at_iso, end_calc = _compute_ends_at(offer, filters, pickup, tz_name)
@@ -761,16 +722,6 @@ def _process_offers_for_user(
         if end_calc:
             rid["_endsAtCalc"] = end_calc
 
-        if DEBUG_ENDS:
-            pid = offer.get("id")
-            kind = (rid.get("type") or "").lower()
-            pu = rid.get("pickupTime")
-            end = rid.get("endsAt")
-            fstr = (end_calc or {}).get("formula") or "—"
-            print(
-                f"[{datetime.now()}] OFFER[{pid}] type={kind} | pickup={_fmt_local_iso(pu, tz_name)} "
-                f"| endsAt={_fmt_local_iso(end, tz_name)} | formula={fstr}"
-            )
 
         # --- 0a) Vehicle class — cheapest filter, checked FIRST to short-circuit early ---
         filter_results: List[dict] = []
@@ -1015,17 +966,8 @@ def _process_offers_for_user(
         reason_for_log = forced_accept_reason or base_reason
         _filter_ms = (time.perf_counter() - filter_t0) * 1000.0
         observe_ms("offer_filter_ms", _filter_ms)
-        _filter_summary = " | ".join(
-            f"{'✅' if fr['ok'] else '❌'} {fr['name']}" + (f": {fr['detail']}" if fr.get('detail') else "")
-            for fr in filter_results
-        )
-        _verdict = "⛔ REJECTED" if is_rejected else "✅ PASSED"
-        _builtins.print(
-            f"[{datetime.now()}] {_verdict} [{platform.upper()}] {oid} ({_filter_ms:.0f}ms) → {_filter_summary or 'no filters'}"
-        )
 
         if is_rejected:
-            print(f"[{datetime.now()}] ⛔ Rejected {oid} – {base_reason or 'filtres non respectés'}")
             if oid:
                 mark_not_valid_cached(bot_id, telegram_id, platform, str(oid), cache_version=cache_version)
             header_line = _build_offer_header_line(offer, "rejected", platform, forced_accept=False)
@@ -1130,9 +1072,6 @@ def _process_offers_for_user(
                     )
 
         if reserve_future is not None:
-            _builtins.print(
-                f"[{datetime.now()}] 🚀 [{platform.upper()}] Reserving {oid} | {_price_disp}"
-            )
             # Block subsequent offers in THIS cycle from overlapping this time slot.
             if predicted_end:
                 current_cycle_intervals.append((pickup, predicted_end))

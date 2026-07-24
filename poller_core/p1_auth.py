@@ -259,7 +259,6 @@ def maybe_refresh_p1_session(
     token: Optional[str],
     mobile_headers: Optional[dict],
     force: bool = False,
-    trigger: str = "unspecified",
 ) -> Tuple[Optional[str], Optional[dict], bool, str]:
     current_token = _normalize_bearer(token)
     if not force and current_token and not _needs_refresh(current_token):
@@ -271,12 +270,6 @@ def maybe_refresh_p1_session(
     oauth_headers = auth_meta.get("oauth_headers") if isinstance(auth_meta.get("oauth_headers"), dict) else None
 
     if not refresh_token or not client_id:
-        if force:
-            _builtins.print(
-                f"[{datetime.now()}] ⚠️ P1 refresh skipped for {bot_id}/{telegram_id} "
-                f"trigger={trigger} reason=missing_refresh_material "
-                f"(refresh_token={'yes' if refresh_token else 'no'}, client_id={'yes' if client_id else 'no'})"
-            )
         return current_token, mobile_headers, False, "missing_refresh_material"
 
     req_headers = _build_oauth_headers(mobile_headers, oauth_headers)
@@ -286,10 +279,6 @@ def maybe_refresh_p1_session(
         oauth_headers=req_headers,
     )
     if not ok or not new_token:
-        _builtins.print(
-            f"[{datetime.now()}] ⚠️ P1 refresh failed for {bot_id}/{telegram_id} "
-            f"trigger={trigger} note={note}"
-        )
         return current_token, mobile_headers, False, note
 
     next_headers = dict(mobile_headers or {})
@@ -310,11 +299,6 @@ def maybe_refresh_p1_session(
         auth_meta=next_auth_meta,
     )
     set_token_status(bot_id, telegram_id, "valid")
-    _builtins.print(
-        f"[{datetime.now()}] ✅ P1 refresh success for {bot_id}/{telegram_id} "
-        f"trigger={trigger} refresh_rotated={'yes' if new_refresh and str(new_refresh) != str(refresh_token) else 'no'}"
-    )
-
     runtime_headers = next_headers if next_headers else None
     return new_token, runtime_headers, True, "ok"
 

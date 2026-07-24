@@ -4,7 +4,6 @@ from typing import Optional, Tuple, List
 from datetime import datetime
 from dateutil.tz import gettz
 
-from .config import CF_DEBUG
 from .utils import _parse_hhmm, _to_str, _esc
 from .timeparse import parse_iso_dt_or_none
 from db import list_user_custom_filters
@@ -27,12 +26,6 @@ def _filter_pickup_airport_reject(offer: dict) -> Tuple[Optional[str], Optional[
     text = (pu or "").lower()
     matched = next((k for k in ["airport", "aéroport"] if k in text), None)
     if matched:
-        if CF_DEBUG:
-            try:
-                oid = offer.get("id")
-                print(f"[{datetime.now()}] 🧪 CF fired: pickup_airport_reject (match='{matched}') for offer={oid} PU='{pu}'")
-            except Exception:
-                pass
         return "reject", "pickup contains 'airport'"
     return None, None
 
@@ -150,14 +143,10 @@ def _run_custom_filters(offer: dict, enabled_map: dict, tz_name: str):
     if "pickup_airport_reject" in enabled_map:
         d, r = _filter_pickup_airport_reject(offer)
         if d:
-            if CF_DEBUG:
-                print(f"[{datetime.now()}] 🔔 Decision from CF 'pickup_airport_reject': {d} – {r}")
             return d, r
     if "block_baby_seat" in enabled_map:
         d, r = _filter_block_baby_seat(offer)
         if d:
-            if CF_DEBUG:
-                print(f"[{datetime.now()}] 🔔 Decision from CF 'block_baby_seat': {d} – {r}")
             return d, r
     if "reject_under_90_between_20_22" in enabled_map:
         try:

@@ -247,7 +247,6 @@ def maybe_reset_inmem_caches():
     if now - _accepted_last_reset >= _ACCEPTED_RESET_INTERVAL:
         accepted_per_user.clear()
         _accepted_last_reset = now
-        print(f"[{datetime.now()}] 🔁 Cleared in-memory accept cache (24h rotation)")
     if now - _rejected_last_reset >= _REJECTED_RESET_INTERVAL:
         rejected_per_user.clear()
         _rejected_last_reset = now

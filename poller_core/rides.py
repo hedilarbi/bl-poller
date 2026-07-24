@@ -1,7 +1,7 @@
 from typing import List, Tuple, Optional
 from datetime import datetime, timedelta
 
-from .config import DUMP_RIDES_IN_LOGS, DUMP_RIDES_IN_TELEGRAM, MAX_RIDES_SHOWN
+from .config import DUMP_RIDES_IN_TELEGRAM, MAX_RIDES_SHOWN
 from .utils import (
     _esc,
     _fmt_dt_local,
@@ -171,8 +171,5 @@ def _rides_snapshot_from_p1_list(rides: list, tz_name: str) -> str:
 
 
 def _dump_rides(bot_id: str, telegram_id: int, text: str, platform: str):
-    if DUMP_RIDES_IN_LOGS:
-        # strip tags for logs
-        print(f"[{datetime.now()}] {text.replace('<b>','').replace('</b>','').replace('<code>','').replace('</code>','')}")
     if DUMP_RIDES_IN_TELEGRAM:
         maybe_send_message(bot_id, telegram_id, "accepted", text, platform)
