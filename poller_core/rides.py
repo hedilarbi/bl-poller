@@ -22,87 +22,111 @@ def _quiet_print(*args, **kwargs):
 
 print = _quiet_print
 
+def _ride_interval(
+    rid: dict,
+    filters: Optional[dict] = None,
+    tz_name: Optional[str] = None,
+) -> Optional[Tuple[datetime, Optional[datetime], str]]:
+    """
+    (pickup_dt, end_dt, how) for one scheduled ride, or None without a usable pickup.
+    `how` explains how end_dt was obtained (logged so the computation can be checked).
+
+    end_dt resolution order (first match wins):
+      1a. hourly: duration + 2h safety buffer (mirrors _compute_ends_at)
+      1b. transfer: estimatedDistanceMeters (or distance in km) + admin formula
+      2.  endsAt / ends_at / end_time from the API
+      3.  API duration
+      4.  None — _find_conflict then uses a 4h safety window
+    """
+    # start time (accept common keys)
+    start_s = (
+        rid.get("pickupTime") or rid.get("pickup_time") or
+        rid.get("starts_at") or rid.get("start_time") or
+        rid.get("pickup") or rid.get("start")
+    )
+    if not start_s:
+        return None
+    start_dt = parse_iso_dt_or_none(start_s)
+    if start_dt is None:
+        return None
+
+    end_dt = None
+    how = "unknown end -> 4h safety window"
+    ride_type = str(rid.get("rideType") or rid.get("type") or "").lower()
+
+    # 1a. Hourly ride: durationMinutes + 2h safety buffer (mirrors _compute_ends_at)
+    if filters and tz_name and not end_dt:
+        try:
+            if ride_type == "hourly":
+                _SAFETY_BUFFER_MIN = 120.0
+                dur_min = _duration_minutes_from_rid(rid)
+                if dur_min is not None:
+                    end_dt = start_dt + timedelta(minutes=float(dur_min) + _SAFETY_BUFFER_MIN)
+                    how = f"hourly {float(dur_min):.0f}min + 120min safety"
+                else:
+                    # No duration info at all → 2h safety buffer alone
+                    end_dt = start_dt + timedelta(minutes=_SAFETY_BUFFER_MIN)
+                    how = "hourly, no duration -> 120min safety"
+        except Exception:
+            end_dt = None
+
+    # 1b. Transfer ride: admin formula (distance / speed * 2 + bonus)
+    if filters and tz_name and not end_dt:
+        try:
+            # Prefer meters (same field/unit as offers) — without it the formula was
+            # skipped and the ride ended at pickup + one-way API duration, too early.
+            dist_m = rid.get("estimatedDistanceMeters")
+            dist_km = float(dist_m) / 1000.0 if dist_m is not None else rid.get("distance")  # "distance" is km
+            if dist_km is not None and ride_type == "transfer":
+                dist_km = float(dist_km)
+                rule = _pick_formula_for_pickup(filters, start_dt, tz_name)
+                if rule:
+                    speed = float(rule.get("speed_kmh") or 0.0)
+                    bonus = float(rule.get("bonus_min") or 0.0)
+                    if speed > 0:
+                        one_way_min = (dist_km / speed) * 60.0
+                        total_min = one_way_min * 2.0 + bonus
+                        end_dt = start_dt + timedelta(minutes=total_min)
+                        window = f"{rule.get('start')}-{rule.get('end')}" if rule.get("start") else "else"
+                        how = (
+                            f"formula [{window}] {dist_km:.1f}km @ {speed:g}km/h x2 + {bonus:g}min"
+                            f" = {total_min:.0f}min"
+                        )
+        except Exception:
+            end_dt = None
+
+    # 2. endsAt from API
+    if not end_dt:
+        end_s = rid.get("endsAt") or rid.get("ends_at") or rid.get("end_time")
+        if end_s:
+            end_dt = parse_iso_dt_or_none(end_s)
+            if end_dt:
+                how = "API endsAt (no formula applicable)"
+
+    # 3. estimatedDurationMinutes from API
+    if not end_dt:
+        dur_min = _duration_minutes_from_rid(rid)
+        if dur_min is not None:
+            try:
+                end_dt = start_dt + timedelta(minutes=float(dur_min))
+                how = f"API duration {float(dur_min):.0f}min (no formula applicable)"
+            except Exception:
+                end_dt = None
+
+    return start_dt, end_dt, how
+
+
 def _extract_intervals_from_rides(
     rides: list,
     filters: Optional[dict] = None,
     tz_name: Optional[str] = None,
 ) -> List[Tuple[datetime, Optional[datetime]]]:
-    """
-    Convert a list of /rides API items into (pickup_dt, end_dt) intervals.
-
-    end_dt resolution order (first match wins):
-      1. endsAt / ends_at / end_time  (provided by Blacklane API)
-      2. estimatedDurationMinutes     (provided by Blacklane API)
-      3. distance + speed_kmh formula (admin config)  ← NEW
-      4. None — ride will be ignored by _find_conflict (known limitation)
-    """
+    """Convert a list of scheduled rides into (pickup_dt, end_dt) intervals (see _ride_interval)."""
     out: List[Tuple[datetime, Optional[datetime]]] = []
     for it in (rides or []):
-        rid = it if isinstance(it, dict) else {}
-
-        # start time (accept common keys)
-        start_s = (
-            rid.get("pickupTime") or rid.get("pickup_time") or
-            rid.get("starts_at") or rid.get("start_time") or
-            rid.get("pickup") or rid.get("start")
-        )
-        if not start_s:
-            continue
-        start_dt = parse_iso_dt_or_none(start_s)
-        if start_dt is None:
-            continue
-
-        end_dt = None
-
-        # 1a. Hourly ride: durationMinutes + 2h safety buffer (mirrors _compute_ends_at)
-        if filters and tz_name and not end_dt:
-            try:
-                ride_type = (rid.get("rideType") or rid.get("type") or "").lower()
-                if ride_type == "hourly":
-                    _SAFETY_BUFFER_MIN = 120.0
-                    dur_min = _duration_minutes_from_rid(rid)
-                    if dur_min is not None:
-                        end_dt = start_dt + timedelta(minutes=float(dur_min) + _SAFETY_BUFFER_MIN)
-                    else:
-                        # No duration info at all → 2h safety buffer alone
-                        end_dt = start_dt + timedelta(minutes=_SAFETY_BUFFER_MIN)
-            except Exception:
-                end_dt = None
-
-        # 1b. Transfer ride: admin formula (distance / speed * 2 + bonus)
-        if filters and tz_name and not end_dt:
-            try:
-                dist_km = rid.get("distance")  # /rides returns distance in km
-                ride_type = (rid.get("rideType") or rid.get("type") or "").lower()
-                if dist_km is not None and ride_type == "transfer":
-                    dist_km = float(dist_km)
-                    rule = _pick_formula_for_pickup(filters, start_dt, tz_name)
-                    if rule:
-                        speed = float(rule.get("speed_kmh") or 0.0)
-                        bonus = float(rule.get("bonus_min") or 0.0)
-                        if speed > 0:
-                            one_way_min = (dist_km / speed) * 60.0
-                            total_min = one_way_min * 2.0 + bonus
-                            end_dt = start_dt + timedelta(minutes=total_min)
-            except Exception:
-                end_dt = None
-
-        # 2. endsAt from API
-        if not end_dt:
-            end_s = rid.get("endsAt") or rid.get("ends_at") or rid.get("end_time")
-            if end_s:
-                end_dt = parse_iso_dt_or_none(end_s)
-
-        # 3. estimatedDurationMinutes from API
-        if not end_dt:
-            dur_min = _duration_minutes_from_rid(rid)
-            if dur_min is not None:
-                try:
-                    end_dt = start_dt + timedelta(minutes=float(dur_min))
-                except Exception:
-                    end_dt = None
-
-        out.append((start_dt, end_dt))
+        iv = _ride_interval(it if isinstance(it, dict) else {}, filters, tz_name)
+        if iv:
+            out.append((iv[0], iv[1]))
     return out
 
 

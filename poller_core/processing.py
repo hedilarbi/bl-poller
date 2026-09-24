@@ -43,18 +43,23 @@ from .state import (
     accepted_per_user,
     rejected_per_user,
     invalidate_rides_cache,
-    set_rides_cache,
     set_rides_fetched,
     add_ride_to_cache,
+    add_local_reserved,
+    remove_local_reserved,
+    get_local_reserved,
     is_recent_not_valid,
     mark_not_valid_cached,
 )
 from .p1_client import get_rides_p1, reserve_offer_p1
 from .p2_client import (
+    _athena_assigned_driver_id,
     _filter_rides_by_bl_uuid,
+    _map_athena_ride,
+    get_planned_rides_p2_with_login,
     reserve_offer_p2,
 )
-from .rides import _extract_intervals_from_rides
+from .rides import _ride_interval
 from .timeparse import parse_iso_dt_or_none
 from .metrics import observe_ms
 from db import log_offer_decision, save_offer_message, set_token_status
@@ -79,19 +84,138 @@ def _refresh_rides_cache_now(
     portal_password: Optional[str] = None,
     filters: Optional[dict] = None,
 ):
-    intervals: List[Tuple[datetime, Optional[datetime]]] = []
+    rides = _fetch_scheduled_rides(
+        bot_id, telegram_id, tz_name, p1_token, p1_headers, bl_uuid, portal_email, portal_password, filters,
+    )
+    # On failure keep the previous rides. Replacing them with [] (old behavior) made every
+    # accepted ride invisible to the conflict check until the next refresh.
+    if rides is not None:
+        set_rides_fetched(bot_id, telegram_id, rides)
 
-    if p1_token:
+
+def _fetch_scheduled_rides(
+    bot_id: str,
+    telegram_id: int,
+    tz_name: str,
+    p1_token: Optional[str],
+    p1_headers: Optional[dict],
+    bl_uuid: Optional[str],
+    portal_email: Optional[str],
+    portal_password: Optional[str],
+    filters: Optional[dict],
+) -> Optional[Dict[str, Tuple[datetime, Optional[datetime]]]]:
+    """Scheduled rides as {key: (pickup, end)}, or None if the source failed.
+
+    Same source as the current-schedule page: Athena /hades/rides (planned) when BL
+    credentials exist — the portal token is re-created from email/password, so it never
+    stays expired — else mobile /rides. end is recomputed with the admin end-time formulas.
+    """
+    dropped: List[Tuple[str, str]] = []  # (ride id, why it is not a busy slot)
+    if portal_email and portal_password:
+        source = "athena"
+        status_code, data, _ = get_planned_rides_p2_with_login(bot_id, telegram_id, portal_email, portal_password)
+        if data is None:
+            _builtins.print(f"[{datetime.now()}] ⚠️ scheduled rides [{source}] fetch failed ({status_code}) — keeping previous rides")
+            return None
+        # Keep rides assigned to this chauffeur AND rides not assigned to anyone yet (e.g. just
+        # accepted on P2, not dispatched): blocking such a slot is safer than double-booking.
+        rides = []
+        for raw in data:
+            if not isinstance(raw, dict):
+                continue
+            driver = _athena_assigned_driver_id(raw)
+            if bl_uuid and driver not in (None, str(bl_uuid)):
+                dropped.append((str(raw.get("id")), f"assigned to another driver ({driver})"))
+                continue
+            ride = _map_athena_ride(raw)
+            ride["_driver"] = "me" if (driver and driver == str(bl_uuid)) else (driver or "unassigned")
+            rides.append(ride)
+        raw_count = len(data)
+    elif p1_token:
+        source = "mobile"
         status_code, ride_results = get_rides_p1(p1_token, headers=p1_headers)
-        if status_code == 200 and isinstance(ride_results, list):
-            kept = _filter_rides_by_bl_uuid(ride_results, bl_uuid) if bl_uuid else ride_results
-            intervals.extend(_extract_intervals_from_rides(kept, filters=filters, tz_name=tz_name))
+        if status_code != 200 or not isinstance(ride_results, list):
+            _builtins.print(f"[{datetime.now()}] ⚠️ scheduled rides [{source}] fetch failed (HTTP {status_code}) — keeping previous rides")
+            return None
+        kept = _filter_rides_by_bl_uuid(ride_results, bl_uuid) if bl_uuid else ride_results
+        kept_ids = {id(r) for r in kept}
+        for r in ride_results:
+            if isinstance(r, dict) and id(r) not in kept_ids:
+                ch = (r.get("chauffeur") or {}).get("id")
+                dropped.append((str(r.get("id")), f"filtered (status={r.get('rideStatus')}, chauffeur={ch})"))
+        rides = [dict(r, _driver=(r.get("chauffeur") or {}).get("id") or "unassigned") for r in kept if isinstance(r, dict)]
+        raw_count = len(ride_results)
+    else:
+        return None
 
-    set_rides_cache(bot_id, telegram_id, intervals)
+    out: Dict[str, Tuple[datetime, Optional[datetime]]] = {}
+    lines: List[Tuple[datetime, str]] = []
+    for i, r in enumerate(rides):
+        iv = _ride_interval(r, filters, tz_name)
+        if not iv:
+            dropped.append((str(r.get("id")), "no pickup time"))
+            continue
+        start, end, how = iv
+        out[f"{source}_{r.get('id') or i}"] = (start, end)
+        lines.append((start, (
+            f"   ✅ {r.get('id')} | {r.get('rideType') or r.get('type')} | {r.get('rideStatus')} | "
+            f"driver={r.get('_driver')} | {_fmt_local(start, tz_name)} → {_fmt_local(end, tz_name)} | {how}"
+        )))
+    _log_scheduled_rides(bot_id, telegram_id, source, tz_name, raw_count, out, lines, dropped)
+    return out
+
+
+_rides_log_sig: Dict[Tuple[str, int], tuple] = {}
+
+
+def _fmt_local(dt: Optional[datetime], tz_name: Optional[str]) -> str:
+    if dt is None:
+        return "?"
+    try:
+        return dt.astimezone(gettz(tz_name)).strftime("%d/%m %H:%M")
+    except Exception:
+        return str(dt)
+
+
+def _log_scheduled_rides(
+    bot_id: str,
+    telegram_id: int,
+    source: str,
+    tz_name: str,
+    raw_count: int,
+    out: Dict[str, Tuple[datetime, Optional[datetime]]],
+    lines: List[Tuple[datetime, str]],
+    dropped: List[Tuple[str, str]],
+):
+    """Full detail on first fetch and whenever a ride or a computed end changes; one line otherwise."""
+    sig = (
+        source,
+        tuple(sorted((k, s.isoformat(), e.isoformat() if e else None) for k, (s, e) in out.items())),
+        tuple(sorted(dropped)),
+    )
+    key = (str(bot_id), int(telegram_id))
+    now = datetime.now()
+    if _rides_log_sig.get(key) == sig:
+        _builtins.print(f"[{now}] 🚗 scheduled rides [{source}] unchanged: {len(out)} busy (raw={raw_count})")
+        return
+    _rides_log_sig[key] = sig
+
+    msg = [f"[{now}] 🚗 scheduled rides [{source}] UPDATED: raw={raw_count} busy={len(out)} ignored={len(dropped)} (times in {tz_name})"]
+    msg += [text for _, text in sorted(lines, key=lambda x: x[0].timestamp())]
+    msg += [f"   ✖ {rid} | ignored: {why}" for rid, why in dropped]
+    reserved = get_local_reserved(bot_id, telegram_id)
+    msg.append(f"   📌 bot-accepted registry (2nd source): {len(reserved)} ride(s)")
+    msg += [
+        f"      {k} | {_fmt_local(s, tz_name)} → {_fmt_local(e, tz_name)}"
+        for k, (s, e) in sorted(reserved.items(), key=lambda x: x[1][0].timestamp())
+    ]
+    _builtins.print("\n".join(msg))
 
 
 _bg_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 _notify_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+_rides_init_inflight: set = set()
+_rides_init_lock = threading.Lock()
 
 
 def _refresh_rides_cache_async(
@@ -138,26 +262,15 @@ def _init_rides_cache_now(
     portal_password: Optional[str] = None,
     filters: Optional[dict] = None,
 ):
-    """Fetch rides once and store keyed by ride_id. Called on first poll only.
+    """Fetch scheduled rides once. Called on first poll only.
 
-    end_dt is pre-computed here using the admin formula so that _find_conflict
-    never receives a None end time for a ride that has distance data.
+    On failure the cache starts empty (P2 must keep polling) — the persisted registry of
+    the bot's own acceptances still covers conflicts, and the next refresh retries.
     """
-    rides_dict: Dict[str, Any] = {}
-
-    if p1_token:
-        status_code, ride_results = get_rides_p1(p1_token, headers=p1_headers)
-        if status_code == 200 and isinstance(ride_results, list):
-            # BUG FIX: was `else []` — if no bl_uuid, keep ALL rides instead of dropping them
-            kept = _filter_rides_by_bl_uuid(ride_results, bl_uuid) if bl_uuid else ride_results
-            for i, r in enumerate(kept):
-                rid = str(r.get("id") or f"_p1_{i}")
-                # Pre-compute end_dt at store time — never store (pickup, None) for transfer rides
-                intervals = _extract_intervals_from_rides([r], filters=filters, tz_name=tz_name)
-                if intervals:
-                    rides_dict[f"p1_{rid}"] = intervals[0]
-
-    set_rides_fetched(bot_id, telegram_id, rides_dict)
+    rides = _fetch_scheduled_rides(
+        bot_id, telegram_id, tz_name, p1_token, p1_headers, bl_uuid, portal_email, portal_password, filters,
+    )
+    set_rides_fetched(bot_id, telegram_id, rides or {})
 
 
 def _init_rides_cache_async(
@@ -172,6 +285,13 @@ def _init_rides_cache_async(
     portal_password: Optional[str] = None,
     filters: Optional[dict] = None,
 ):
+    # poll_user calls this every cycle until the cache is filled: submit one job at a time.
+    key = (str(bot_id), int(telegram_id))
+    with _rides_init_lock:
+        if key in _rides_init_inflight:
+            return
+        _rides_init_inflight.add(key)
+
     def _job():
         try:
             _init_rides_cache_now(
@@ -188,6 +308,9 @@ def _init_rides_cache_async(
             )
         except Exception:
             invalidate_rides_cache(bot_id, telegram_id)
+        finally:
+            with _rides_init_lock:
+                _rides_init_inflight.discard(key)
 
     _bg_executor.submit(_job)
 
@@ -201,6 +324,7 @@ _reserve_executor = concurrent.futures.ThreadPoolExecutor(max_workers=16)
 _pending_reserves: Dict[str, float] = {}  # offer_key -> submitted_at (monotonic)
 _pending_reserves_lock = threading.Lock()
 _PENDING_RESERVE_TTL_S = 15.0  # safety TTL — entry removed by callback, not by timer
+_UNKNOWN_RESERVE_BLOCK_S = 1800.0  # slot kept blocked after a reserve timeout / 5xx
 _reserve_cleanup_state: dict = {"ts": 0.0}   # rate-limits stale cleanup to once per 5s
 _RESERVE_CLEANUP_INTERVAL_S: float = 5.0
 
@@ -273,6 +397,21 @@ def _on_reserve_done(future: concurrent.futures.Future, cand: dict):
     )
 
     if not reserve_ok:
+        if offer_key:
+            if rs is None or rs >= 500:
+                # Outcome unknown (timeout / server error): the ride may still have been
+                # booked. Keep its slot blocked until the rides refresh has had time to list it.
+                add_local_reserved(
+                    bot_id, telegram_id, offer_key, pickup_dt, predicted_end,
+                    ttl_s=_UNKNOWN_RESERVE_BLOCK_S,
+                )
+                _builtins.print(
+                    f"[{datetime.now()}] 📌 registry kept {offer_key} {_UNKNOWN_RESERVE_BLOCK_S / 60:.0f}min "
+                    f"(reserve outcome unknown, HTTP {rs})"
+                )
+            else:
+                remove_local_reserved(bot_id, telegram_id, offer_key)
+                _builtins.print(f"[{datetime.now()}] 📌 registry − {offer_key} (reserve refused, HTTP {rs})")
         if platform == "p1" and rs == 401:
             set_token_status(bot_id, telegram_id, "expired")
         _builtins.print(
@@ -685,6 +824,10 @@ def _process_offers_for_user(
     # Fixes: bot accepting two offers at the same time within one poll cycle.
     current_cycle_intervals: List[Tuple[datetime, Optional[datetime]]] = []
 
+    # Rides reserved by this poller in earlier cycles / the P1 call of this poll,
+    # including reserves still in flight that /rides and the cache don't know yet.
+    local_reserved = get_local_reserved(bot_id, telegram_id)
+
     for offer in offers:
         filter_t0 = time.perf_counter()
         oid = offer.get("id")
@@ -942,7 +1085,9 @@ def _process_offers_for_user(
             record_result("Créneaux bloqués", conflict_reason is None, conflict_reason)
 
         # 5.5) Conflict with already accepted offers (busy intervals)
-        effective_busy_intervals = accepted_intervals + pending_intervals + current_cycle_intervals
+        # Skip this offer's own entries (same offer id seen on P1 and P2).
+        local_busy = [iv for k, iv in local_reserved.items() if k.split(":", 1)[-1] != str(oid)]
+        effective_busy_intervals = accepted_intervals + local_busy + pending_intervals + current_cycle_intervals
         conflict_with = _find_conflict(pickup, ends_at_iso, effective_busy_intervals)
         if conflict_with:
             a_start, a_end = conflict_with
@@ -1019,7 +1164,9 @@ def _process_offers_for_user(
         # Accepted candidate — fire-and-forget reserve.
         # The poll cycle does NOT block waiting for the reserve HTTP response.
         # A callback (_on_reserve_done) handles the result asynchronously.
-        predicted_end = _compute_ends_at(offer, filters, pickup, tz_name) or parse_iso_dt_or_none((offer.get("rides") or [{}])[0].get("endsAt"))
+        # ends_at_iso = rid["endsAt"], already set above from _compute_ends_at (or the API).
+        # NB: _compute_ends_at returns a (iso, details) TUPLE — never use it as a datetime.
+        predicted_end = parse_iso_dt_or_none(ends_at_iso)
 
         offer_key = f"{platform}:{oid}" if oid else None
 
@@ -1082,6 +1229,13 @@ def _process_offers_for_user(
             # Mark as in-flight so next poll cycle skips this offer
             if offer_key:
                 _pending_reserve_add(offer_key)
+                # Block this slot for every later cycle NOW — before the callback is
+                # attached, so a failure callback can't run before this add.
+                add_local_reserved(bot_id, telegram_id, offer_key, pickup, predicted_end)
+                _builtins.print(
+                    f"[{datetime.now()}] 📌 registry + {offer_key} | {_fmt_local(pickup, tz_name)} → "
+                    f"{_fmt_local(predicted_end, tz_name)} ({tz_name}) | reserve sent"
+                )
             # Register after submit — off the detection→submit critical path.
             if AUTO_RESERVE_ENABLED and oid:
                 register_candidate(

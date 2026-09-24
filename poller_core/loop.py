@@ -312,10 +312,13 @@ def poll_user(user):
     if poll_real_orders:
         maybe_cleanup_rides(bot_id, telegram_id)
         cached_intervals = get_rides_intervals(bot_id, telegram_id)
+        # Scheduled rides come from Athena (BL email/password — never stays expired) when
+        # credentials exist, else from mobile /rides (P1 token).
+        has_portal_creds = bool(email and password)
         if cached_intervals is None:
             # First time: lazy-init rides cache in background (one-shot fetch)
             p1_init_token = token if (token and str(token).strip()) else None
-            if p1_init_token:
+            if p1_init_token or has_portal_creds:
                 _init_rides_cache_async(
                     bot_id,
                     telegram_id,
@@ -332,7 +335,7 @@ def poll_user(user):
                 # offers before the conflict filter is populated.
                 return f"Done with user {telegram_id} (rides cache init pending)"
             else:
-                # No P1 token: initialize cache with empty dict so the poller
+                # No source at all: initialize cache with empty dict so the poller
                 # is never permanently stuck. Rides will be loaded on next refresh.
                 from .state import set_rides_fetched as _set_rides_fetched
                 _set_rides_fetched(bot_id, telegram_id, {})
@@ -342,7 +345,7 @@ def poll_user(user):
             age_s = get_rides_cache_age_s(bot_id, telegram_id)
             if age_s is not None and age_s >= RIDES_REFRESH_INTERVAL_S:
                 p1_ref_token = token if (token and str(token).strip()) else None
-                if p1_ref_token:
+                if p1_ref_token or has_portal_creds:
                     # Touch timestamp NOW so parallel cycles don't trigger a duplicate refresh
                     from .state import touch_rides_cache_ts as _touch_rides_ts
                     _touch_rides_ts(bot_id, telegram_id)

@@ -20,6 +20,7 @@ from .config import (
     P2_ENABLE_RUM_HEADERS,
 )
 from db import get_portal_token, update_portal_token
+from .state import get_portal_token_mem, set_portal_token_mem
 
 
 def _quiet_print(*args, **kwargs):
@@ -655,6 +656,59 @@ def _athena_get_rides(
     except requests.exceptions.RequestException as e:
         print(f"[{datetime.now()}] ❌ Athena rides error: {e}")
         return None, None, None
+
+
+def get_planned_rides_p2(access_token: str, page_size: int = PORTAL_PAGE_SIZE, max_pages: int = 20):
+    """All Athena 'planned' rides (the endpoint of the current-schedule page), across pages.
+    Returns (status_code, data, included); data is None if any page failed."""
+    data: list = []
+    included: list = []
+    status = None
+    for page in range(1, max_pages + 1):
+        status, payload, _ = _athena_get_rides(access_token, page=page, page_size=page_size)
+        if status is None or not (200 <= status < 300) or not isinstance(payload, dict):
+            return status, None, None
+        items = payload.get("data") or []
+        data.extend(items)
+        included.extend(payload.get("included") or [])
+        if len(items) < page_size:
+            break
+    return status, data, included
+
+
+def get_planned_rides_p2_with_login(bot_id: str, telegram_id: int, email: str, password: str):
+    """get_planned_rides_p2 with the current-schedule login flow: use the portal token, and on
+    missing/rejected token log in again with email/password — so it never stays expired."""
+    tok = get_portal_token_mem(bot_id, telegram_id) or _ensure_portal_token(bot_id, telegram_id, email, password)
+    if tok:
+        status, data, included = get_planned_rides_p2(tok)
+        if status not in (401, 403):
+            return status, data, included
+    ok, tok, note = _athena_login(email, password)
+    if not (ok and tok):
+        return note, None, None
+    update_portal_token(bot_id, telegram_id, tok)
+    set_portal_token_mem(bot_id, telegram_id, tok)
+    return get_planned_rides_p2(tok)
+
+
+def _map_athena_ride(raw: dict) -> dict:
+    """Flatten an Athena JSON:API ride into the shape _extract_intervals_from_rides reads."""
+    attrs = raw.get("attributes") or {}
+    ride = {
+        "id": str(raw.get("id") or ""),
+        "rideType": (attrs.get("booking_type") or "transfer").lower(),
+        "pickupTime": attrs.get("starts_at") or attrs.get("pickup_time") or attrs.get("start_time"),
+        "endsAt": attrs.get("ends_at"),  # used only when no formula applies
+        "estimatedDistanceMeters": attrs.get("distance"),
+        "rideStatus": attrs.get("status") or attrs.get("ride_status"),
+    }
+    try:
+        # Athena gives seconds; convert here (the >1000 heuristic would read 900 s as 900 min).
+        ride["estimatedDurationMinutes"] = float(attrs["estimated_duration"]) / 60.0
+    except (KeyError, TypeError, ValueError):
+        pass
+    return ride
 
 
 def _athena_assigned_driver_id(raw_ride: dict) -> str | None:

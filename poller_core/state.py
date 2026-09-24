@@ -2,9 +2,14 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple, Optional, List, Set
 import base64
+import builtins as _builtins
 import json as _json
+import os
 import threading
 import time
+
+from .config import RESERVED_RIDES_FILE
+from .timeparse import parse_iso_dt_or_none
 
 
 def _quiet_print(*args, **kwargs):
@@ -107,6 +112,125 @@ def add_ride_to_cache(bot_id: str, telegram_id: int, ride_id: str, pickup_dt: da
     entry = _rides_cache.get(key)
     if entry and entry.get("fetched"):
         entry["rides"][str(ride_id)] = (pickup_dt, end_dt)
+
+
+# ── Locally reserved rides ─────────────────────────────────────────────────────
+# Rides this poller reserved, per chauffeur, keyed by offer_key ("p1:<id>").
+# The conflict check's source of truth for the bot's own acceptances: it never depends
+# on /rides (which can fail, lag, or not list P2 rides). A ride blocks its slot from the
+# moment its reserve is SUBMITTED, across P1/P2 calls and poll cycles, and is persisted
+# to RESERVED_RIDES_FILE so a restart does not forget it. Removed only when the ride is
+# over, or when Blacklane explicitly refused the reserve.
+# Entry: (pickup_dt, end_dt, expires_ts or None = until the ride is over).
+_local_reserved: Dict[Tuple[str, int], Dict[str, Tuple[datetime, Optional[datetime], Optional[float]]]] = {}
+_local_reserved_lock = threading.Lock()
+_local_reserved_loaded = False
+_LOCAL_RESERVED_UNKNOWN_END = timedelta(hours=4)  # same safety window as _find_conflict
+
+
+def _load_local_reserved_locked():
+    """Load the persisted registry once (caller holds _local_reserved_lock)."""
+    global _local_reserved_loaded
+    if _local_reserved_loaded:
+        return
+    _local_reserved_loaded = True
+    try:
+        with open(RESERVED_RIDES_FILE) as f:
+            records = _json.load(f)
+    except FileNotFoundError:
+        return
+    except Exception as e:
+        _builtins.print(f"[{datetime.now()}] ⚠️ reserved rides file unreadable ({RESERVED_RIDES_FILE}): {e}")
+        return
+    for r in records or []:
+        try:
+            s = parse_iso_dt_or_none(r.get("pickup"))
+            if s is None:
+                continue
+            e = parse_iso_dt_or_none(r.get("end")) if r.get("end") else None
+            exp = float(r["expires_ts"]) if r.get("expires_ts") is not None else None
+            rides = _local_reserved.setdefault((str(r["bot_id"]), int(r["telegram_id"])), {})
+            rides[str(r["offer_key"])] = (s, e, exp)
+        except Exception:
+            continue
+    _builtins.print(f"[{datetime.now()}] 📌 loaded {len(records or [])} reserved ride(s) from {RESERVED_RIDES_FILE}")
+
+
+def _save_local_reserved_locked():
+    """Atomically persist the registry (caller holds _local_reserved_lock)."""
+    records = [
+        {
+            "bot_id": b,
+            "telegram_id": t,
+            "offer_key": k,
+            "pickup": s.isoformat(),
+            "end": e.isoformat() if e else None,
+            "expires_ts": exp,
+        }
+        for (b, t), rides in _local_reserved.items()
+        for k, (s, e, exp) in rides.items()
+    ]
+    try:
+        os.makedirs(os.path.dirname(RESERVED_RIDES_FILE) or ".", exist_ok=True)
+        tmp = RESERVED_RIDES_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            _json.dump(records, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, RESERVED_RIDES_FILE)
+    except Exception as e:
+        _builtins.print(f"[{datetime.now()}] ⚠️ could not persist reserved rides ({RESERVED_RIDES_FILE}): {e}")
+
+
+def add_local_reserved(
+    bot_id: str,
+    telegram_id: int,
+    offer_key: str,
+    pickup_dt: datetime,
+    end_dt: Optional[datetime],
+    ttl_s: Optional[float] = None,
+):
+    expires_ts = time.time() + float(ttl_s) if ttl_s is not None else None
+    with _local_reserved_lock:
+        _load_local_reserved_locked()
+        rides = _local_reserved.setdefault((str(bot_id), int(telegram_id)), {})
+        rides[str(offer_key)] = (pickup_dt, end_dt, expires_ts)
+        _save_local_reserved_locked()
+
+
+def remove_local_reserved(bot_id: str, telegram_id: int, offer_key: str):
+    with _local_reserved_lock:
+        _load_local_reserved_locked()
+        rides = _local_reserved.get((str(bot_id), int(telegram_id)))
+        if rides and rides.pop(str(offer_key), None) is not None:
+            _save_local_reserved_locked()
+
+
+def get_local_reserved(bot_id: str, telegram_id: int) -> Dict[str, Tuple[datetime, Optional[datetime]]]:
+    """Return {offer_key: (pickup, end)}, dropping rides already over or past their TTL
+    (a ride that has ended cannot overlap any future offer)."""
+    now_ts = time.time()
+    now_dt = datetime.now(timezone.utc)
+    with _local_reserved_lock:
+        _load_local_reserved_locked()
+        rides = _local_reserved.get((str(bot_id), int(telegram_id)))
+        if not rides:
+            return {}
+        pruned = False
+        for k, (s, e, exp) in list(rides.items()):
+            if exp is not None and now_ts >= exp:
+                del rides[k]
+                pruned = True
+                continue
+            try:
+                if (e or s + _LOCAL_RESERVED_UNKNOWN_END) < now_dt:
+                    del rides[k]
+                    pruned = True
+            except TypeError:
+                pass  # naive datetime — keep it: blocking a slot is safer than double-booking
+        if pruned:
+            _save_local_reserved_locked()
+        return {k: (s, e) for k, (s, e, _) in rides.items()}
 
 
 def maybe_cleanup_rides(bot_id: str, telegram_id: int):

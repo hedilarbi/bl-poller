@@ -301,8 +301,15 @@ is_rejected = bool(failed_filters) AND NOT accept_override
 
 Pour éviter d'accepter deux courses qui se chevauchent, le bot maintient un **cache des intervalles occupés** en mémoire (`state.py`).
 
+### Source : même endpoint que la page current-schedule
+`_fetch_scheduled_rides()` (dans `processing.py`) récupère les courses programmées :
+- **Si les identifiants BL (email/mot de passe) existent** : `GET https://athena.blacklane.com/hades/rides?filter[group]=planned` (toutes les pages). Le token portail est recréé par login si absent ou rejeté (401/403), donc il ne reste jamais expiré. On garde les courses attribuées au chauffeur (`assigned_driver == bl_uuid`) **et** celles pas encore attribuées ; celles d'un autre chauffeur sont ignorées.
+- **Sinon** : `GET https://chauffeur-app-api.blacklane.com/rides` (token mobile P1), comme la page current-schedule.
+
+La fin de chaque course est **recalculée avec les end-time formulas** de l'utilisateur (voir ci-dessous).
+
 ### Initialisation
-Au premier cycle pour un utilisateur, `_init_rides_cache_async()` appelle `GET /rides` (P1) et calcule les intervalles `(pickup_dt, end_dt)` pour chaque course acceptée.
+Au premier cycle pour un utilisateur, `_init_rides_cache_async()` (un seul job à la fois) remplit le cache via `_fetch_scheduled_rides()`.
 
 ### Calcul de `end_dt`
 Ordre de priorité pour déterminer la fin d'une course :
@@ -313,10 +320,22 @@ Ordre de priorité pour déterminer la fin d'une course :
 5. Si aucun : `None` → fenêtre de sécurité de 4h dans `_find_conflict()`
 
 ### Rafraîchissement périodique
-Le cache se rafraîchit toutes les `RIDES_REFRESH_INTERVAL_S` secondes (défaut : 600 s = 10 min) via `_refresh_rides_cache_async()`. Le timestamp est touché **avant** le fetch pour éviter les rafraîchissements dupliqués dans des cycles parallèles.
+Le cache se rafraîchit toutes les `RIDES_REFRESH_INTERVAL_S` secondes (défaut : 60 s) via `_refresh_rides_cache_async()`. Le timestamp est touché **avant** le fetch pour éviter les rafraîchissements dupliqués dans des cycles parallèles. Si la source échoue (401/403, timeout, 429, 5xx), **le cache précédent est conservé** (il n'est jamais remplacé par une liste vide).
+
+### Registre des courses réservées par le bot (source toujours disponible)
+2ᵉ source de vérité, si l'API échoue ou ne renvoie rien (échecs, délai, course pas encore listée). Chaque offre dont la réservation est **envoyée** est donc inscrite dans un registre (`add_local_reserved()` dans `state.py`) avec son `(pickup, endsAt calculé par formule)` :
+- consulté par le contrôle de conflit à chaque offre, en plus du cache `/rides` ;
+- persisté dans `RESERVED_RIDES_FILE` (défaut : `cache/reserved_rides.json`) et rechargé au démarrage ;
+- une course n'en sort que lorsqu'elle est **terminée**, ou si Blacklane **refuse explicitement** la réservation (4xx). En cas de timeout / 5xx (résultat inconnu), le créneau reste bloqué 30 min.
+
+### Logs à vérifier sur le VPS
+- `🚗 scheduled rides [athena] UPDATED: …` — au démarrage et dès qu'une course ou une heure de fin change : une ligne `✅` par course occupée (id, type, statut, chauffeur, début → fin en heure locale, **comment la fin a été calculée** : formule utilisée, distance, vitesse, bonus), une ligne `✖` par course ignorée (avec la raison), puis le contenu du registre `📌`.
+- `🚗 scheduled rides [athena] unchanged: N busy` — refresh réussi sans changement.
+- `⚠️ scheduled rides [athena] fetch failed (…) — keeping previous rides` — la source a échoué, l'ancien cache est conservé.
+- `📌 registry + / − / kept …` — une offre entre dans le registre (réservation envoyée), en sort (refus explicite), ou reste bloquée 30 min (résultat inconnu).
 
 ### Ajout en temps réel
-Après chaque réservation réussie, `add_ride_to_cache()` ajoute immédiatement le nouvel intervalle sans attendre le prochain rafraîchissement.
+Après chaque réservation réussie, `add_ride_to_cache()` ajoute aussi l'intervalle au cache `/rides` (il sera remplacé au prochain refresh ; le registre ci-dessus, lui, le garde).
 
 ### Nettoyage
 Une fois par jour (`RIDES_CLEANUP_INTERVAL_S` = 86400 s), les courses passées (terminées il y a plus de 2h) sont supprimées du cache.

@@ -196,7 +196,9 @@ def _find_conflict(
     for a_start, a_end in accepted_intervals:
         # If end time is unknown, use a conservative 4h safety window
         # rather than silently skipping the ride (which caused accepted conflicts).
-        effective_end = a_end if a_end else (a_start + timedelta(hours=4))
+        # isinstance: a non-datetime end (e.g. a tuple) used to raise TypeError here and
+        # abort the whole cycle, which let the overlapping offer through on the next one.
+        effective_end = a_end if isinstance(a_end, datetime) else (a_start + timedelta(hours=4))
         if a_start <= new_start <= effective_end:
             return (a_start, effective_end)
         if new_end and not (new_end <= a_start or new_start >= effective_end):
