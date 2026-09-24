@@ -79,18 +79,27 @@ def _header_drop(headers: dict, name: str):
             headers.pop(k, None)
 
 
-def _jwt_exp_unverified(token: str) -> Optional[int]:
+def _jwt_payload_unverified(token: Optional[str]) -> dict:
     try:
         raw = token[7:].strip() if str(token).lower().startswith("bearer ") else token
         parts = (raw or "").split(".")
         if len(parts) != 3:
-            return None
+            return {}
         payload_b64 = parts[1] + "==="
         payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")))
-        exp = payload.get("exp")
-        return int(exp) if isinstance(exp, (int, float)) else None
+        return payload if isinstance(payload, dict) else {}
     except Exception:
-        return None
+        return {}
+
+
+def _jwt_claim(token: Optional[str], name: str) -> Optional[str]:
+    val = _jwt_payload_unverified(token).get(name)
+    return str(val) if val not in (None, "") else None
+
+
+def _jwt_exp_unverified(token: str) -> Optional[int]:
+    exp = _jwt_payload_unverified(token).get("exp")
+    return int(exp) if isinstance(exp, (int, float)) else None
 
 
 def _needs_refresh(token: Optional[str]) -> bool:
@@ -243,7 +252,11 @@ def refresh_p1_access_token(
             access = root.get("access_token")
             new_refresh = root.get("refresh_token") or refresh_token
             if access:
-                return True, _normalize_bearer(access), str(new_refresh), "ok"
+                # Auth0 returns a raw JWT; the API needs "Bearer <jwt>" (sent as-is in Authorization).
+                access = _normalize_bearer(access)
+                if not access.lower().startswith("bearer "):
+                    access = f"Bearer {access}"
+                return True, access, str(new_refresh), "ok"
             return False, None, None, "upstream:no_access_token"
         if r.status_code in (400, 401, 403):
             return False, None, None, f"unauthorized:{r.status_code}"
@@ -280,6 +293,12 @@ def maybe_refresh_p1_session(
     )
     if not ok or not new_token:
         return current_token, mobile_headers, False, note
+
+    # The stored refresh_token may come from an older session: never switch chauffeur account.
+    for claim in ("chauffeur_id", "sub"):
+        old_val, new_val = _jwt_claim(current_token, claim), _jwt_claim(new_token, claim)
+        if old_val and new_val and old_val != new_val:
+            return current_token, mobile_headers, False, f"refresh_token_other_account:{claim}"
 
     next_headers = dict(mobile_headers or {})
     _header_drop(next_headers, "Authorization")

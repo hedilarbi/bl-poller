@@ -200,7 +200,7 @@ Le fichier `poller_core/p1_auth.py` gère les 3 niveaux d'authentification P1.
 Le JWT token de l'application mobile est utilisé directement. Sa validité est vérifiée en décodant le payload sans signature (champ `exp`).
 
 ### Niveau 2 — Refresh OAuth
-Quand le token expire (ou approche de l'expiration avec une marge `P1_REFRESH_SKEW_S` = 90 s) :
+Appelé par `_try_p1_oauth_refresh()` (dans `poll_user`), au plus une fois par minute : **avant** l'expiration du JWT (marge `P1_REFRESH_SKEW_S` = 90 s) et sur un 401/403 du poll, **avant** de tenter Playwright. Le nouveau token (préfixé `Bearer `) et le `refresh_token` renouvelé sont sauvegardés sur l'EC2. Un refresh qui changerait de compte chauffeur (`sub` / `chauffeur_id` différents) est refusé. Nécessite un `refresh_token` dans `mobile_auth` : il est enregistré après chaque login Playwright réussi, et n'est plus effacé quand l'utilisateur colle un nouveau token dans le bot.
 ```
 refresh_p1_access_token()
   POST https://login-chauffeur.blacklane.com/oauth/token
@@ -228,7 +228,7 @@ _playwright_pkce_login(email, password)
 - Délais de frappe aléatoires (300–800 ms)
 - Verrou global `_playwright_lock` : un seul login Playwright à la fois
 - Intervalle minimum entre deux tentatives : 10 minutes (`_AR_MIN_INTERVAL_S`)
-- Désactivation automatique après 3 échecs consécutifs (`_AUTO_REFRESH_FAIL_THRESHOLD`)
+- Après 3 échecs consécutifs (`_AUTO_REFRESH_FAIL_THRESHOLD`) : pause de 1 h (`_AR_COOLDOWN_S`), respectée aussi sur le chemin 401/403
 
 ---
 

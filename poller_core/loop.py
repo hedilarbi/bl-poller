@@ -26,6 +26,7 @@ from .config import (
     OFFER_MEMORY_DEDUPE,
     ATHENA_USE_OFFERS_ETAG,
     RIDES_REFRESH_INTERVAL_S,
+    P1_REFRESH_SKEW_S,
 )
 from .state import (
     maybe_reset_inmem_caches,
@@ -48,7 +49,12 @@ from .state import (
 )
 from .utils import _normalize_formulas
 from .p1_client import get_offers_p1
-from .p1_auth import get_playwright_p1_token, save_playwright_p1_token
+from .p1_auth import (
+    get_playwright_p1_token,
+    save_playwright_p1_token,
+    maybe_refresh_p1_session,
+    is_p1_token_expired,
+)
 from .p2_client import (
     _map_portal_offer,
     _map_partner_offer,
@@ -126,6 +132,30 @@ _playwright_lock = threading.Lock()
 _p1_skip_until: Dict[Tuple[str, int], float] = {}
 # Throttle for P1 cooldown log: records last time the cooldown message was printed per user.
 _p1_cooldown_last_log: Dict[tuple, float] = {}
+# refresh_token grant (plain HTTP, no browser): tried shortly before the JWT expires and on
+# 401/403, before falling back to the Playwright login. key -> (last attempt ts, last note).
+_P1_OAUTH_REFRESH_MIN_INTERVAL_S = 60.0
+_p1_oauth_refresh_last: Dict[Tuple[str, int], Tuple[float, str]] = {}
+# Token this poller just refreshed: key -> (replaced token, new token). The users list (EC2,
+# cached 3 s) can still return the replaced token for a few cycles — or longer if the EC2
+# save failed — which would trigger 401/403 and a needless re-login.
+_p1_refreshed_tokens: Dict[Tuple[str, int], Tuple[str, str]] = {}
+
+
+def _remember_refreshed_p1_token(bot_id: str, telegram_id: int, old_token: Optional[str], new_token: str):
+    if old_token and new_token and old_token != new_token:
+        _p1_refreshed_tokens[(str(bot_id), int(telegram_id))] = (old_token, new_token)
+
+
+def _current_p1_token(bot_id: str, telegram_id: int, token_from_users: Optional[str]) -> Optional[str]:
+    key = (str(bot_id), int(telegram_id))
+    pair = _p1_refreshed_tokens.get(key)
+    if pair:
+        old_token, new_token = pair
+        if token_from_users == old_token:
+            return new_token
+        _p1_refreshed_tokens.pop(key, None)  # EC2 caught up, or the user set another token
+    return token_from_users
 # P2 presence tracking: offer IDs currently visible in Athena per user.
 # An offer is processed only when it first appears; re-processed only after it disappears and comes back.
 _p2_active_offers: Dict[Tuple[str, int], Set[str]] = {}
@@ -157,7 +187,12 @@ def _get_users_cached() -> list:
     global _users_cache_data, _users_cache_ts
     now = time.time()
     if _users_cache_data is None or (now - _users_cache_ts) >= _USERS_CACHE_TTL_S:
-        _users_cache_data = get_all_users_with_bot_admin_active()
+        try:
+            _users_cache_data = get_all_users_with_bot_admin_active()
+        except Exception as e:
+            # EC2 unreachable: keep polling with the last known users (config is cached in
+            # memory) instead of crashing the whole process. Retried after the TTL.
+            _poll_log(f"⚠️ EC2 users fetch failed — keeping last known users: {type(e).__name__}: {e}")
         _users_cache_ts = now
     return _users_cache_data or []
 
@@ -246,6 +281,7 @@ def poll_user(user):
     else:
         bot_id, telegram_id, token, filters_json, active, bot_admin_active = user[:6]
         cache_version = 0
+    token = _current_p1_token(bot_id, telegram_id, token)
 
     if not bot_admin_active:
         return
@@ -396,6 +432,31 @@ def poll_user(user):
                 clear_pinned_warning(bot_id, telegram_id, other)
             pin_warning_if_needed(bot_id, telegram_id, kind)
 
+    def _try_p1_oauth_refresh(reason: str) -> bool:
+        """Refresh the P1 token with the stored refresh_token (plain HTTP, no browser).
+        Rate-limited per user. Returns True if `token` was replaced."""
+        nonlocal token, mobile_headers
+        key = (str(bot_id), int(telegram_id))
+        now = time.time()
+        last_ts, last_note = _p1_oauth_refresh_last.get(key, (0.0, ""))
+        if now - last_ts < _P1_OAUTH_REFRESH_MIN_INTERVAL_S:
+            return False
+        old_token = token
+        new_token, new_headers, refreshed, note = maybe_refresh_p1_session(
+            bot_id, telegram_id, token, mobile_headers, force=True,
+        )
+        _p1_oauth_refresh_last[key] = (now, note)
+        if not refreshed or not new_token:
+            if note != last_note:  # don't repeat e.g. "missing_refresh_material" every minute
+                _poll_log(f"⚠️ [P1 REFRESH] [{bot_id}] refresh_token grant not possible ({reason}): {note}")
+            return False
+        token = new_token
+        if new_headers is not None:
+            mobile_headers = new_headers
+        _remember_refreshed_p1_token(bot_id, telegram_id, old_token, new_token)
+        _poll_log(f"🔄 [P1 REFRESH] [{bot_id}] token refreshed with refresh_token ({reason}) — no browser login needed")
+        return True
+
     # ---------- PLATFORM 1 OFFERS ----------
     offers_p1: List[dict] = []
     if ENABLE_P1 and USE_MOCK_P1:
@@ -517,10 +578,16 @@ def poll_user(user):
                 return []
             _set_token_problem("no_token")
             return []
+        # Refresh shortly before the JWT expires, so polling never reaches 401/403.
+        if is_p1_token_expired(token, skew_s=P1_REFRESH_SKEW_S):
+            _try_p1_oauth_refresh("token expiring")
         t0 = time.perf_counter()
         status_code, results = get_offers_p1(token, headers=mobile_headers)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         observe_ms("p1_fetch_ms", elapsed_ms)
+        # Plain refresh_token grant first; the Playwright login below is only the last resort.
+        if status_code in (401, 403) and _try_p1_oauth_refresh(f"poll HTTP {status_code}"):
+            status_code, results = get_offers_p1(token, headers=mobile_headers)
         if status_code in (401, 403):
             _fail_key = (str(bot_id), int(telegram_id))
             _now_fail = time.time()
@@ -545,6 +612,14 @@ def poll_user(user):
             auto_refresh = get_token_auto_refresh(str(bot_id), int(telegram_id))
             _ar_key = (str(bot_id), int(telegram_id))
             if auto_refresh and email and password:
+                # Honor the 1h cooldown after repeated failures. It was only checked when there was
+                # no token at all, so here Playwright retried ~7x/hour forever (3 attempts, then an
+                # immediate 4th since the attempt timestamp was cleared), hammering the login page.
+                _cd_until = _ar_cooldown_until.get(_ar_key, 0.0)
+                if _cd_until > time.time():
+                    _p1_skip_until[_ar_key] = min(_cd_until, time.time() + _AR_MIN_INTERVAL_S)
+                    _p1_fail_counts.pop(_fail_key, None)
+                    return []
                 # Enforce minimum interval between Playwright attempts to avoid Blacklane login detection
                 _last = _ar_last_attempt.get(_ar_key, 0.0)
                 _now = time.time()
@@ -569,9 +644,11 @@ def poll_user(user):
                     if status_code2 == 200:
                         # Token works — save and reset counters
                         save_playwright_p1_token(bot_id, telegram_id, new_token, new_refresh, mobile_headers)
+                        _remember_refreshed_p1_token(bot_id, telegram_id, token, new_token)
                         token = new_token
                         _p1_fail_counts.pop(_fail_key, None)
                         _auto_refresh_fail_counts.pop(_ar_key, None)
+                        _ar_cooldown_until.pop(_ar_key, None)
                         _ar_last_attempt.pop(_ar_key, None)
                         _p1_skip_until.pop(_ar_key, None)
                         set_token_status(bot_id, telegram_id, "valid")
@@ -587,6 +664,7 @@ def poll_user(user):
                         # The Playwright token is fresh and likely valid — save it and
                         # let the next cycle confirm.
                         save_playwright_p1_token(bot_id, telegram_id, new_token, new_refresh, mobile_headers)
+                        _remember_refreshed_p1_token(bot_id, telegram_id, token, new_token)
                         token = new_token
                         _p1_fail_counts.pop(_fail_key, None)
                         _p1_skip_until.pop(_ar_key, None)
