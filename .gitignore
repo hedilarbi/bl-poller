@@ -37,3 +37,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# ── Tokens exported by tools/p1_manual_login.py ─────────────
+p1_tokens.json

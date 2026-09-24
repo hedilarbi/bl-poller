@@ -339,6 +339,60 @@ _CAPTCHA_FRAME_HINTS = ("challenges.cloudflare.com", "turnstile", "hcaptcha", "r
 _CAPTCHA_TEXT_HINTS = ("captcha", "verify you are human", "vérifiez que vous êtes humain", "are you a robot")
 
 
+def new_pkce_login_url() -> Tuple[str, str]:
+    """(authorize_url, code_verifier) for the chauffeur-app PKCE login (offline_access → refresh_token)."""
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+    state_val = base64.urlsafe_b64encode(secrets.token_bytes(16)).rstrip(b"=").decode()
+    authorize_url = (
+        f"{MOBILE_AUTH_BASE}/authorize?response_type=code&state={state_val}"
+        f"&scope=openid%20profile%20email%20read:current_user%20offline_access"
+        f"&code_challenge={code_challenge}&code_challenge_method=S256"
+        f"&audience=https://blacklane.com"
+        f"&redirect_uri={_PKCE_REDIRECT_URI}&client_id={MOBILE_CLIENT_ID}"
+    )
+    return authorize_url, code_verifier
+
+
+def extract_pkce_code(url: Optional[str]) -> Optional[str]:
+    """Authorization code from the app redirect (com.blacklane.chauffeur://...?code=...)."""
+    if url and url.startswith("com.blacklane"):
+        m = re.search(r"[?&]code=([^&]+)", url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def exchange_pkce_code(code: str, code_verifier: str) -> Tuple[bool, Optional[str], Optional[str], str]:
+    """Exchange the PKCE code for (ok, "Bearer <access>", refresh_token, note)."""
+    try:
+        r = _session_request(
+            "POST",
+            f"{MOBILE_AUTH_BASE}/oauth/token",
+            json={
+                "grant_type": "authorization_code",
+                "client_id": MOBILE_CLIENT_ID,
+                "code": code,
+                "code_verifier": code_verifier,
+                "redirect_uri": _PKCE_REDIRECT_URI,
+            },
+            headers={"Accept": "application/json", "Accept-Encoding": "gzip, deflate"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            access = data.get("access_token")
+            new_refresh = data.get("refresh_token")
+            if access:
+                return True, f"Bearer {access.strip()}", new_refresh, "ok"
+            return False, None, None, "playwright:no_access_token"
+        return False, None, None, f"playwright:token_exchange_{r.status_code}"
+    except Exception as e:
+        return False, None, None, f"playwright:exchange_error:{type(e).__name__}"
+
+
 async def _page_shows_captcha(page) -> bool:
     """True if the login page shows a human-verification challenge (captcha frame or text)."""
     try:
@@ -356,19 +410,7 @@ async def _playwright_pkce_login(email: str, password: str) -> Tuple[bool, Optio
     except ImportError:
         return False, None, None, "playwright_not_installed"
 
-    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode()).digest()
-    ).rstrip(b"=").decode()
-    state_val = base64.urlsafe_b64encode(secrets.token_bytes(16)).rstrip(b"=").decode()
-
-    authorize_url = (
-        f"{MOBILE_AUTH_BASE}/authorize?response_type=code&state={state_val}"
-        f"&scope=openid%20profile%20email%20read:current_user%20offline_access"
-        f"&code_challenge={code_challenge}&code_challenge_method=S256"
-        f"&audience=https://blacklane.com"
-        f"&redirect_uri={_PKCE_REDIRECT_URI}&client_id={MOBILE_CLIENT_ID}"
-    )
+    authorize_url, code_verifier = new_pkce_login_url()
 
     code_holder: dict = {}
     screenshot_path: dict = {}
@@ -402,10 +444,9 @@ async def _playwright_pkce_login(email: str, password: str) -> Tuple[bool, Optio
             page = await context.new_page()
 
             def _extract_code_from_url(url: str):
-                if url.startswith("com.blacklane"):
-                    m = re.search(r"[?&]code=([^&]+)", url)
-                    if m:
-                        code_holder["code"] = m.group(1)
+                code = extract_pkce_code(url)
+                if code:
+                    code_holder["code"] = code
 
             async def _on_request(request):
                 _extract_code_from_url(request.url)
@@ -467,29 +508,7 @@ async def _playwright_pkce_login(email: str, password: str) -> Tuple[bool, Optio
         )
         return False, None, None, "playwright:no_code_captured"
 
-    try:
-        r = _session_request(
-            "POST",
-            f"{MOBILE_AUTH_BASE}/oauth/token",
-            json={
-                "grant_type": "authorization_code",
-                "client_id": MOBILE_CLIENT_ID,
-                "code": code,
-                "code_verifier": code_verifier,
-                "redirect_uri": _PKCE_REDIRECT_URI,
-            },
-            timeout=10,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            access = data.get("access_token")
-            new_refresh = data.get("refresh_token")
-            if access:
-                return True, f"Bearer {access.strip()}", new_refresh, "ok"
-            return False, None, None, "playwright:no_access_token"
-        return False, None, None, f"playwright:token_exchange_{r.status_code}"
-    except Exception as e:
-        return False, None, None, f"playwright:exchange_error:{type(e).__name__}"
+    return exchange_pkce_code(code, code_verifier)
 
 
 def get_playwright_p1_token(
