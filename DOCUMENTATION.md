@@ -229,6 +229,7 @@ _playwright_pkce_login(email, password)
 - Verrou global `_playwright_lock` : un seul login Playwright à la fois
 - Intervalle minimum entre deux tentatives : 10 minutes (`_AR_MIN_INTERVAL_S`)
 - Après 3 échecs consécutifs (`_AUTO_REFRESH_FAIL_THRESHOLD`) : pause de 1 h (`_AR_COOLDOWN_S`), respectée aussi sur le chemin 401/403
+- Si la page de login affiche une vérification humaine (captcha) : aucune nouvelle tentative Playwright pendant 6 h (`_AR_CAPTCHA_COOLDOWN_S`) et un message Telegram demande un nouveau token. Le refresh par `refresh_token` (niveau 2) continue d'être tenté, car il ne passe pas par la page de login.
 
 ---
 

@@ -165,8 +165,10 @@ def _build_oauth_headers(mobile_headers: Optional[dict], oauth_headers: Optional
         headers["Content-Type"] = "application/json"
     if not _header_get(headers, "Accept-Language"):
         headers["Accept-Language"] = "en-CA,en-US;q=0.9,en;q=0.8"
-    if not _header_get(headers, "Accept-Encoding"):
-        headers["Accept-Encoding"] = "gzip, deflate, br"
+    # Never advertise brotli (the mobile headers do): without the `brotli` package requests
+    # can't decode it, so a successful token response was unreadable → "upstream:bad_json".
+    _header_drop(headers, "Accept-Encoding")
+    headers["Accept-Encoding"] = "gzip, deflate"
     if not _header_get(headers, "Connection"):
         headers["Connection"] = "keep-alive"
     if not _header_get(headers, "User-Agent"):
@@ -247,6 +249,13 @@ def refresh_p1_access_token(
             try:
                 j = r.json() or {}
             except Exception:
+                _builtins.print(
+                    f"[{datetime.now()}] ❌ P1 refresh: HTTP {r.status_code} but body is not JSON | "
+                    f"url={r.url} redirects={len(r.history)} | content-type={r.headers.get('Content-Type')} | "
+                    f"content-encoding={r.headers.get('Content-Encoding')} | body={_redact_sensitive_text(r.text, 300)}"
+                )
+                return False, None, None, "upstream:bad_json"
+            if not isinstance(j, dict):
                 return False, None, None, "upstream:bad_json"
             root = j.get("result") if isinstance(j.get("result"), dict) else j
             access = root.get("access_token")
@@ -323,6 +332,22 @@ def maybe_refresh_p1_session(
 
 
 _PKCE_REDIRECT_URI = "com.blacklane.chauffeur://login-chauffeur.blacklane.com/ios/com.blacklane.chauffeur/callback"
+# Login page answered with a human-verification challenge: an automated login cannot succeed,
+# and retrying only reinforces the bot suspicion. Callers stop retrying and alert the user.
+PLAYWRIGHT_CAPTCHA_NOTE = "playwright:captcha"
+_CAPTCHA_FRAME_HINTS = ("challenges.cloudflare.com", "turnstile", "hcaptcha", "recaptcha", "arkoselabs", "captcha")
+_CAPTCHA_TEXT_HINTS = ("captcha", "verify you are human", "vérifiez que vous êtes humain", "are you a robot")
+
+
+async def _page_shows_captcha(page) -> bool:
+    """True if the login page shows a human-verification challenge (captcha frame or text)."""
+    try:
+        if any(h in (f.url or "").lower() for f in page.frames for h in _CAPTCHA_FRAME_HINTS):
+            return True
+        text = (await page.inner_text("body", timeout=3000)).lower()
+        return any(h in text for h in _CAPTCHA_TEXT_HINTS)
+    except Exception:
+        return False
 
 
 async def _playwright_pkce_login(email: str, password: str) -> Tuple[bool, Optional[str], Optional[str], str]:
@@ -407,6 +432,7 @@ async def _playwright_pkce_login(email: str, password: str) -> Tuple[bool, Optio
 
             # If no code yet, save a screenshot so we can diagnose what the browser sees
             if not code_holder.get("code"):
+                screenshot_path["captcha"] = await _page_shows_captcha(page)
                 try:
                     import os as _os
                     _snap_dir = "/tmp/bl_playwright"
@@ -429,6 +455,12 @@ async def _playwright_pkce_login(email: str, password: str) -> Tuple[bool, Optio
         _snap = screenshot_path.get("path", "n/a")
         _url = screenshot_path.get("url", "n/a")
         _title = screenshot_path.get("title", "n/a")
+        if screenshot_path.get("captcha"):
+            _builtins.print(
+                f"[{datetime.now()}] ❌ Playwright blocked by human verification (captcha) | "
+                f"page_url={_url} | screenshot={_snap}"
+            )
+            return False, None, None, PLAYWRIGHT_CAPTCHA_NOTE
         _builtins.print(
             f"[{datetime.now()}] ❌ Playwright no_code_captured | "
             f"page_url={_url} | page_title={_title!r} | screenshot={_snap}"

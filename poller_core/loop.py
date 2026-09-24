@@ -54,6 +54,7 @@ from .p1_auth import (
     save_playwright_p1_token,
     maybe_refresh_p1_session,
     is_p1_token_expired,
+    PLAYWRIGHT_CAPTCHA_NOTE,
 )
 from .p2_client import (
     _map_portal_offer,
@@ -118,6 +119,7 @@ _P1_FAIL_COUNT_TTL_S = 120.0   # entries older than 2 min are stale
 _auto_refresh_fail_counts: Dict[Tuple[str, int], int] = {}
 _AUTO_REFRESH_FAIL_THRESHOLD = 3
 _AR_COOLDOWN_S = 3600.0  # 1h cooldown after 3 consecutive failures before retrying
+_AR_CAPTCHA_COOLDOWN_S = 6 * 3600.0  # no Playwright re-login for 6h after a captcha on the login page
 _ar_cooldown_until: Dict[Tuple[str, int], float] = {}  # replaces permanent DB disable
 # Minimum seconds between two Playwright re-login attempts for the same user.
 # Prevents hammering Blacklane login with rapid retries when the session is broken.
@@ -432,6 +434,22 @@ def poll_user(user):
                 clear_pinned_warning(bot_id, telegram_id, other)
             pin_warning_if_needed(bot_id, telegram_id, kind)
 
+    def _on_playwright_captcha(ar_key):
+        """Human verification on the Blacklane login: an automated login can't succeed and each
+        retry reinforces the bot suspicion — stop re-logins for a long time and tell the user."""
+        _ar_cooldown_until[ar_key] = time.time() + _AR_CAPTCHA_COOLDOWN_S
+        _auto_refresh_fail_counts.pop(ar_key, None)
+        _poll_log(
+            f"⏳ [AUTO-REFRESH] [{bot_id}] captcha on Blacklane login — no automatic re-login "
+            f"for {int(_AR_CAPTCHA_COOLDOWN_S // 3600)}h (refresh_token grant still tried)"
+        )
+        tg_send_message(
+            _resolve_bot_token(bot_id, telegram_id),
+            telegram_id,
+            "⚠️ <b>Blacklane asks for a human verification (captcha)</b> — the bot can't log in "
+            "by itself. Please send a new token.",
+        )
+
     def _try_p1_oauth_refresh(reason: str) -> bool:
         """Refresh the P1 token with the stored refresh_token (plain HTTP, no browser).
         Rate-limited per user. Returns True if `token` was replaced."""
@@ -543,7 +561,7 @@ def poll_user(user):
                     _ar_last_attempt.pop(_ar_key, None)
                     return []
                 try:
-                    ok, new_token, new_refresh, _ = get_playwright_p1_token(bot_id, telegram_id, email, password)
+                    ok, new_token, new_refresh, pw_note = get_playwright_p1_token(bot_id, telegram_id, email, password)
                 finally:
                     _playwright_lock.release()
                 if ok and new_token:
@@ -563,6 +581,10 @@ def poll_user(user):
                         tg_send_message(bot_tok, telegram_id, "✅ <b>Token refreshed successfully</b> — bot is back online.")
                         _log_offers_found("P1", telegram_id, results2 or [])
                         return results2 or []
+                if pw_note == PLAYWRIGHT_CAPTCHA_NOTE:
+                    _on_playwright_captcha(_ar_key)
+                    _set_token_problem("no_token")
+                    return []
                 _ar_n = _auto_refresh_fail_counts.get(_ar_key, 0) + 1
                 _auto_refresh_fail_counts[_ar_key] = _ar_n
                 if _ar_n >= _AUTO_REFRESH_FAIL_THRESHOLD:
@@ -636,7 +658,7 @@ def poll_user(user):
                     _p1_fail_counts.pop(_fail_key, None)
                     return []
                 try:
-                    ok, new_token, new_refresh, _ = get_playwright_p1_token(bot_id, telegram_id, email, password)
+                    ok, new_token, new_refresh, pw_note = get_playwright_p1_token(bot_id, telegram_id, email, password)
                 finally:
                     _playwright_lock.release()
                 if ok and new_token:
@@ -671,6 +693,10 @@ def poll_user(user):
                         return []
                     _log_p1_non_200(bot_id, status_code2, results2, context="post-refresh-check")
                     _poll_log(f"❌ [AUTO-REFRESH] [{bot_id}] New token still {status_code2} after Playwright login")
+                if pw_note == PLAYWRIGHT_CAPTCHA_NOTE:
+                    _on_playwright_captcha(_ar_key)
+                    _set_token_problem("expired")
+                    return []
                 # Auto-refresh attempt failed (401/403 from new token, or Playwright itself failed)
                 _ar_n = _auto_refresh_fail_counts.get(_ar_key, 0) + 1
                 _auto_refresh_fail_counts[_ar_key] = _ar_n
