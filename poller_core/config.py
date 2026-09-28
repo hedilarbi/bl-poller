@@ -27,6 +27,8 @@ P2_BURST_ACTIVE_DURATION = float(os.getenv("P2_BURST_ACTIVE_DURATION",  "300")) 
 P2_BURST_CALM_DURATION   = float(os.getenv("P2_BURST_CALM_DURATION",    "60"))  # seconds of slow polling per cycle (default 1 min)
 MAX_WORKERS = max(1, int(os.getenv("MAX_WORKERS", "10")))
 RIDES_REFRESH_INTERVAL_S = int(os.getenv("RIDES_REFRESH_INTERVAL_S", "60"))  # scheduled rides (Athena) refresh
+# A filter-rejected offer is skipped this long, then re-checked (no Telegram if it did not change).
+REJECTED_OFFER_RECHECK_S = float(os.getenv("REJECTED_OFFER_RECHECK_S", "900"))
 # Rides reserved by the bot, persisted so a restart never leaves the conflict check without a source.
 RESERVED_RIDES_FILE = os.getenv(
     "RESERVED_RIDES_FILE",

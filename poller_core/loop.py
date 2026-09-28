@@ -46,6 +46,7 @@ from .state import (
     clear_portal_token_mem,
     is_token_ok_mem,
     set_token_ok_mem,
+    is_rejected_recheck_due,
 )
 from .utils import _normalize_formulas
 from .p1_client import get_offers_p1
@@ -983,14 +984,21 @@ def poll_user(user):
 
     # ---------- P2 presence tracking ----------
     # Only pass NEW P2 offers (not currently active) to processing.
-    # An offer is processed when it first appears, then ignored until it disappears and reappears.
+    # An offer is processed when it first appears, then ignored until it disappears and reappears —
+    # except a filter-rejected offer, re-checked every REJECTED_OFFER_RECHECK_S while still listed.
     user_key = (str(bot_id), int(telegram_id))
     if offers_p2 is None:
         new_p2_offers = []
     else:
         current_p2_ids: Set[str] = {o["id"] for o in (offers_p2 or []) if isinstance(o, dict) and o.get("id")}
         prev_p2_ids = _p2_active_offers.get(user_key, set())
-        new_p2_offers = [o for o in (offers_p2 or []) if isinstance(o, dict) and o.get("id") not in prev_p2_ids]
+        new_p2_offers = [
+            o for o in (offers_p2 or [])
+            if isinstance(o, dict) and (
+                o.get("id") not in prev_p2_ids
+                or is_rejected_recheck_due(bot_id, telegram_id, "p2", str(o.get("id")), cache_version)
+            )
+        ]
         _p2_active_offers[user_key] = current_p2_ids
 
     # ---------- Combine and process ----------

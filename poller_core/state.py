@@ -362,6 +362,37 @@ def cleanup_not_valid_cache(now_ts: Optional[float] = None):
     for k, exp in list(_recent_not_valid_cache.items()):
         if now >= float(exp):
             _recent_not_valid_cache.pop(k, None)
+    for k, (_, seen) in list(_rejected_offer_fp.items()):
+        if now - seen >= _REJECTED_FP_KEEP_S:
+            _rejected_offer_fp.pop(k, None)
+
+
+# ── Filter-rejected offers ─────────────────────────────────────────────────────
+# Fingerprint of the last filter-rejected version of each offer. The offer is re-checked every
+# REJECTED_OFFER_RECHECK_S; if it is still rejected and did not change, the user is not notified
+# again. Not keyed by cache_version: a config/token change triggers a re-check, not a new message.
+_rejected_offer_fp: Dict[Tuple[str, int, str, str], Tuple[str, float]] = {}  # → (fingerprint, last seen)
+_REJECTED_FP_KEEP_S = 86400.0
+
+
+def remember_rejected_offer(bot_id: str, telegram_id: int, platform: str, offer_id: str, fingerprint: str) -> bool:
+    """Record a filter-rejected offer version. True if this exact version was already rejected."""
+    key = (str(bot_id), int(telegram_id), str(platform), str(offer_id))
+    prev = _rejected_offer_fp.get(key)
+    _rejected_offer_fp[key] = (fingerprint, time.time())
+    return prev is not None and prev[0] == fingerprint
+
+
+def forget_rejected_offer(bot_id: str, telegram_id: int, platform: str, offer_id: str):
+    _rejected_offer_fp.pop((str(bot_id), int(telegram_id), str(platform), str(offer_id)), None)
+
+
+def is_rejected_recheck_due(bot_id: str, telegram_id: int, platform: str, offer_id: str, cache_version: int = 0) -> bool:
+    """True for a previously filter-rejected offer whose re-check delay is over."""
+    key = (str(bot_id), int(telegram_id), str(platform), str(offer_id))
+    return key in _rejected_offer_fp and not is_recent_not_valid(
+        bot_id, telegram_id, platform, offer_id, cache_version=cache_version
+    )
 
 
 def maybe_reset_inmem_caches():

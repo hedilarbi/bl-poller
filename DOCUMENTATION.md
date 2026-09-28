@@ -508,9 +508,11 @@ _user_runtime_cache: Dict[(bot_id, tg_id), {
 
 ```python
 _recent_not_valid_cache: Dict[(bot_id, tg_id, platform, offer_id, cache_version), expiry_ts]
-TTL : 60 secondes
+_rejected_offer_fp: Dict[(bot_id, tg_id, platform, offer_id), (fingerprint, last_seen)]
 ```
-Après un rejet ou un échec de réservation, l'offre est ignorée pendant 60 s pour éviter de retenter sur la même offre en boucle.
+- **Offre refusée par les filtres** : ignorée pendant `REJECTED_OFFER_RECHECK_S` (défaut 900 s = 15 min), puis réévaluée normalement (elle peut passer entre-temps : prix plus haut, créneau libéré…). Si elle est refusée à nouveau **sans avoir changé** (même empreinte : prix, classe, trajet, horaires, distance, demandes), pas de message Telegram ni de nouveau log, et un nouveau cycle de 15 min démarre (log `🔕 … still rejected, unchanged`). Si elle a changé, l'utilisateur est notifié. Un changement de config/token (`cache_version`) déclenche une réévaluation, mais pas de nouveau message si l'offre est identique.
+- **P2** : une offre refusée qui reste affichée est elle aussi réévaluée toutes les 15 min (sinon, une offre P2 n'est traitée qu'à sa première apparition).
+- **Échec de réservation** : l'offre est ignorée pendant 60 s.
 
 ### Portal token en mémoire
 

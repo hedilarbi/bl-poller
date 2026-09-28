@@ -1,4 +1,5 @@
 import uuid
+import hashlib
 import json
 import re
 import time
@@ -16,6 +17,7 @@ from .config import (
     FAST_ACCEPT_MODE,
     FAST_ACCEPT_NOTIFY_REJECTED,
     OFFER_MEMORY_DEDUPE,
+    REJECTED_OFFER_RECHECK_S,
 )
 from .utils import (
     _esc,
@@ -50,6 +52,8 @@ from .state import (
     get_local_reserved,
     is_recent_not_valid,
     mark_not_valid_cached,
+    remember_rejected_offer,
+    forget_rejected_offer,
 )
 from .p1_client import get_rides_p1, reserve_offer_p1
 from .p2_client import (
@@ -765,6 +769,27 @@ def _build_reject_summary_lines(filter_results: List[dict]) -> str:
     return "\n".join(lines)
 
 
+_OFFER_FP_RIDE_FIELDS = (
+    "type", "pickupTime", "pickUpLocation", "dropOffLocation", "estimatedDistanceMeters",
+    "estimatedDurationMinutes", "durationMinutes", "kmIncluded", "flight", "guestRequests",
+)
+
+
+def _offer_fingerprint(offer: dict) -> str:
+    """Hash of what makes an offer (price, class, rides). Ignores our own computed / volatile
+    fields (endsAt, _poll_ts…) so an unchanged offer always gives the same value."""
+    core = {
+        "price": offer.get("price"),
+        "currency": offer.get("currency"),
+        "vehicleClass": offer.get("vehicleClass"),
+        "rides": [
+            {k: r.get(k) for k in _OFFER_FP_RIDE_FIELDS}
+            for r in (offer.get("rides") or []) if isinstance(r, dict)
+        ],
+    }
+    return hashlib.sha1(json.dumps(core, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def debug_print_offers(telegram_id: int, offers: list):
     if not DEBUG_PRINT_OFFERS:
         return
@@ -1113,8 +1138,23 @@ def _process_offers_for_user(
         observe_ms("offer_filter_ms", _filter_ms)
 
         if is_rejected:
+            # Skip this offer for REJECTED_OFFER_RECHECK_S, then re-check it (it may pass by then:
+            # higher price, freed slot…). Rejected again without any change → the user already got
+            # this exact offer: no Telegram, no new log, just a new re-check cycle.
+            unchanged = False
             if oid:
-                mark_not_valid_cached(bot_id, telegram_id, platform, str(oid), cache_version=cache_version)
+                mark_not_valid_cached(
+                    bot_id, telegram_id, platform, str(oid),
+                    cache_version=cache_version, ttl_s=REJECTED_OFFER_RECHECK_S,
+                )
+                unchanged = remember_rejected_offer(bot_id, telegram_id, platform, str(oid), _offer_fingerprint(offer))
+            if unchanged:
+                _builtins.print(
+                    f"[{datetime.now()}] 🔕 [{platform.upper()}] {oid} still rejected, unchanged — not notified, "
+                    f"re-check in {REJECTED_OFFER_RECHECK_S / 60:.0f} min"
+                )
+                observe_ms("offer_end2end_ms", _poll_latency_ms(offer))
+                continue
             header_line = _build_offer_header_line(offer, "rejected", platform, forced_accept=False)
             reject_lines = _build_reject_summary_lines(filter_results)
             notify_text = f"{header_line}\n{reject_lines}" if reject_lines else header_line
@@ -1160,6 +1200,10 @@ def _process_offers_for_user(
                 rejected_per_user[bot_id][telegram_id][platform].add(oid)
             observe_ms("offer_end2end_ms", _poll_latency_ms(offer))
             continue
+
+        # Passed the filters: if it is rejected again later, that is news for the user.
+        if oid:
+            forget_rejected_offer(bot_id, telegram_id, platform, str(oid))
 
         # Accepted candidate — fire-and-forget reserve.
         # The poll cycle does NOT block waiting for the reserve HTTP response.
