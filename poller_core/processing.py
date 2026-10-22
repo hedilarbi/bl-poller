@@ -488,6 +488,7 @@ def _reserve_offer_sync(task: dict) -> dict:
                 str(offer_id),
                 price=task.get("price"),
                 headers=task.get("headers"),
+                currency=task.get("currency"),
             )
         elif platform == "p2":
             status_code, body = reserve_offer_p2(
@@ -1242,6 +1243,7 @@ def _process_offers_for_user(
                         "offer_id": oid,
                         "token": p1_token,
                         "price": offer.get("price"),
+                        "currency": offer.get("currency") or "USD",
                         "headers": p1_headers,
                     },
                 )

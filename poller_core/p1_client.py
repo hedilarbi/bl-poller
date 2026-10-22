@@ -356,24 +356,32 @@ def get_offers_p1(token: str, headers: Optional[dict] = None):
         return None, {"error": err}
 
 
-def reserve_offer_p1(token: str, offer_id: str, price: Optional[float] = None, headers: Optional[dict] = None):
+def reserve_offer_p1(
+    token: str,
+    offer_id: str,
+    price: Optional[float] = None,
+    headers: Optional[dict] = None,
+    currency: Optional[str] = None,
+):
     """
     Accept (reserve) an offer on Platform 1.
+
+    Endpoint: POST /api/v1/chauffeur/offers/{offer_id}/acceptance — the old POST /offers
+    answered 401 to every request. Same route shape and error format as the P2 acceptance,
+    so the body is the P2 one.
 
     Returns: (status_code, json_or_text)
       200/201 → accepted
       401/403 → token invalid/expired
+      404      → offer not found / no longer available
       409      → conflict / already taken
-      422      → cannot accept (validation)
     """
     headers = _merge_headers(token, headers)
-    payload = {
-        "id": offer_id,
-        "action": "accept",
-    }
+    payload = {"currency": currency or "USD", "type": "prebooked"}
     if price is not None:
         try:
             payload["price"] = float(price)
+            payload["price_minor_unit"] = int(round(float(price) * 100))
         except Exception:
             payload["price"] = price
     try:
@@ -384,7 +392,7 @@ def reserve_offer_p1(token: str, offer_id: str, price: Optional[float] = None, h
             pass
         r = sess.request(
             "POST",
-            f"{API_HOST}/offers",
+            f"{API_HOST}/api/v1/chauffeur/offers/{offer_id}/acceptance",
             headers=headers,
             json=payload,
             timeout=P1_RESERVE_TIMEOUT_S,
