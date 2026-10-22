@@ -242,12 +242,21 @@ def _should_log_poll_failure(status_code) -> bool:
         status = int(status_code)
     except Exception:
         return False
-    return status in (403, 429) or 500 <= status < 600
+    return status in (401, 403, 429) or 500 <= status < 600
+
+
+_poll_failure_last_log: Dict[tuple, float] = {}
+_POLL_FAILURE_LOG_EVERY_S = 60.0  # same failure repeated every poll: one line per minute
 
 
 def _log_poll_failure(platform: str, bot_id: str, status_code, body, context: str = "poll"):
     if not _should_log_poll_failure(status_code):
         return
+    key = (platform, bot_id, status_code, context)
+    now = time.time()
+    if now - _poll_failure_last_log.get(key, 0.0) < _POLL_FAILURE_LOG_EVERY_S:
+        return
+    _poll_failure_last_log[key] = now
     _poll_log(f"⚠️ {platform} [{bot_id}] {context} status={status_code} | body={_short_body(body)}")
 
 

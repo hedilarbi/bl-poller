@@ -2,6 +2,8 @@ import base64
 import json
 import secrets
 import threading
+import time
+import builtins as _builtins
 from typing import Optional, Tuple
 from datetime import datetime
 import requests
@@ -184,6 +186,40 @@ def _apply_partner_rum_headers(headers: dict) -> None:
     headers["Traceparent"] = f"00-0000000000000000{trace_hex}-{parent_hex}-01"
 
 
+# Portal token -> (lsp_id, bd_id) read from the partner portal /me (same values as the P1 JWT
+# lsp_id / bd_id claims). A failed or incomplete answer is retried after _ME_RETRY_S.
+_me_ids_cache: dict = {}
+_me_ids_failed_at: dict = {}
+_ME_RETRY_S = 30.0
+
+
+def _portal_identity_ids(access_token: str) -> Tuple[str, str]:
+    cached = _me_ids_cache.get(access_token)
+    if cached:
+        return cached
+    if time.time() - _me_ids_failed_at.get(access_token, 0.0) < _ME_RETRY_S:
+        return "", ""
+    try:
+        r = _session_request(
+            "GET",
+            f"{PARTNER_API_BASE}/me",
+            headers={"Authorization": _bearer(access_token), "Accept": "application/json"},
+            timeout=P2_POLL_TIMEOUT_S,
+        )
+        lsp = (r.json() or {}).get("lsp") or {} if r.status_code == 200 else {}
+        ids = (str(lsp.get("id") or "").strip(), str((lsp.get("businessDistrict") or {}).get("uuid") or "").strip())
+    except Exception:
+        ids = ("", "")
+    if not all(ids):
+        _me_ids_failed_at[access_token] = time.time()
+        _builtins.print(f"[{datetime.now()}] ⚠️ P2 portal /me gave no lsp/businessDistrict id — retry in {_ME_RETRY_S:.0f}s")
+        return "", ""
+    if len(_me_ids_cache) > 50:  # portal tokens rotate: keep the cache small
+        _me_ids_cache.clear()
+    _me_ids_cache[access_token] = ids
+    return ids
+
+
 def _partner_headers(
     access_token: str,
     bl_user_id: Optional[str] = None,
@@ -195,6 +231,10 @@ def _partner_headers(
     user_id = str(bl_user_id or claims.get("chauffeur_id") or "").strip()
     lsp_id = str(claims.get("lsp_id") or "").strip()
     bd_id = str(claims.get("bd_id") or "").strip()
+    if not (lsp_id and bd_id):
+        # No P1 token (or no claims in it): the partner API answers 401 without these two
+        # headers, so take them from the portal /me — P2 then only needs the BL email/password.
+        lsp_id, bd_id = _portal_identity_ids(access_token)
 
     headers = {
         "Authorization": _bearer(access_token),
