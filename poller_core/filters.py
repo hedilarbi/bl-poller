@@ -5,6 +5,7 @@ from datetime import datetime
 from dateutil.tz import gettz
 
 from .utils import _parse_hhmm, _to_str, _esc
+from .i18n import t
 from .timeparse import parse_iso_dt_or_none
 from db import list_user_custom_filters
 
@@ -20,17 +21,17 @@ def _get_enabled_filter_slugs(bot_id: str, telegram_id: int):
     return {it["slug"]: it for it in items if it["global_enabled"] and it["user_enabled"]}
 
 
-def _filter_pickup_airport_reject(offer: dict) -> Tuple[Optional[str], Optional[str]]:
+def _filter_pickup_airport_reject(offer: dict, lang: str = "en") -> Tuple[Optional[str], Optional[str]]:
     rid = (offer.get("rides") or [{}])[0]
     pu = (rid.get("pickUpLocation") or {}).get("address") or (rid.get("pickUpLocation") or {}).get("name") or ""
     text = (pu or "").lower()
     matched = next((k for k in ["airport", "aéroport"] if k in text), None)
     if matched:
-        return "reject", "pickup contains 'airport'"
+        return "reject", t(lang, "cf_airport")
     return None, None
 
 
-def _filter_block_baby_seat(offer: dict) -> Tuple[Optional[str], Optional[str]]:
+def _filter_block_baby_seat(offer: dict, lang: str = "en") -> Tuple[Optional[str], Optional[str]]:
     rid = (offer.get("rides") or [{}])[0]
     texts: List[str] = []
 
@@ -96,9 +97,9 @@ def _filter_block_baby_seat(offer: dict) -> Tuple[Optional[str], Optional[str]]:
     def _norm(s: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(s or "").lower())
 
-    for t in texts:
-        if "babyseat" in _norm(t):
-            return "reject", "baby seat blocked"
+    for txt in texts:
+        if "babyseat" in _norm(txt):
+            return "reject", t(lang, "cf_baby_seat")
 
     return None, None
 
@@ -109,6 +110,7 @@ def _filter_reject_under_90_between_20_22(
     min_price: float = 90.0,
     win_from="20:00",
     win_to="22:00",
+    lang: str = "en",
 ) -> Tuple[Optional[str], Optional[str]]:
     rid = (offer.get("rides") or [{}])[0]
     if not rid.get("pickupTime"):
@@ -135,17 +137,17 @@ def _filter_reject_under_90_between_20_22(
 
     price = float(offer.get("price") or 0)
     if price < float(min_price):
-        return "reject", f"price {price:.0f} < {min_price:.0f} between {_to_str(win_from)}-{_to_str(win_to)}"
+        return "reject", t(lang, "cf_price_window", price=f"{price:.0f}", min=f"{min_price:.0f}", a=_to_str(win_from), b=_to_str(win_to))
     return None, None
 
 
-def _run_custom_filters(offer: dict, enabled_map: dict, tz_name: str):
+def _run_custom_filters(offer: dict, enabled_map: dict, tz_name: str, lang: str = "en"):
     if "pickup_airport_reject" in enabled_map:
-        d, r = _filter_pickup_airport_reject(offer)
+        d, r = _filter_pickup_airport_reject(offer, lang)
         if d:
             return d, r
     if "block_baby_seat" in enabled_map:
-        d, r = _filter_block_baby_seat(offer)
+        d, r = _filter_block_baby_seat(offer, lang)
         if d:
             return d, r
     if "reject_under_90_between_20_22" in enabled_map:
@@ -159,28 +161,29 @@ def _run_custom_filters(offer: dict, enabled_map: dict, tz_name: str):
             float(params.get("min_price", 90)),
             params.get("from", "20:00"),
             params.get("to", "22:00"),
+            lang,
         )
         if d:
             return d, r
     return None, None
 
 
-def _format_filter_summary(results: List[dict]) -> str:
+def _format_filter_summary(results: List[dict], lang: str = "en") -> str:
     """
     Build a verbose summary of all filters with green/red markers.
     Each item in results is expected to have: name (str), ok (bool), detail (optional str).
     """
     if not results:
         return ""
-    lines = ["<b>🧰 Filters:</b>"]
+    lines = [f"<b>{t(lang, 'filters_title')}</b>"]
     for r in results:
-        name = r.get("name") or "Filtre"
+        name = r.get("name") or t(lang, "filter_default_name")
         detail = r.get("detail")
         icon = "✅" if r.get("ok") else "❌"
         if detail:
             lines.append(f"{icon} <b>{_esc(name)}:</b> {_esc(detail)}")
         else:
-            lines.append(f"{icon} <b>{_esc(name)}:</b> {_esc('ok' if r.get('ok') else 'non respecté')}")
+            lines.append(f"{icon} <b>{_esc(name)}:</b> {_esc(t(lang, 'filter_ok') if r.get('ok') else t(lang, 'filter_failed'))}")
     return "\n".join(lines)
 
 

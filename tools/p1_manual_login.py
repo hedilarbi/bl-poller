@@ -70,6 +70,30 @@ async def human_login() -> tuple:
     return found["code"], code_verifier
 
 
+def manual_login() -> tuple:
+    """Login in the user's own browser (for when the security challenge refuses to load in the
+    automated window, error 600010). The human pastes back the app redirect URL.
+    Returns (code, code_verifier)."""
+    import webbrowser
+
+    authorize_url, code_verifier = new_pkce_login_url()
+    webbrowser.open(authorize_url)
+    print(
+        "\nThe Blacklane login page just opened in your browser.\n"
+        "  A. BEFORE logging in: press Cmd+Option+I, click the 'Network' tab, check 'Preserve log'.\n"
+        "  B. Log in (email, password, captcha, OTP). At the end the page stays blank: normal.\n"
+        "  C. In the Network filter box type: callback\n"
+        "     Right-click the line that appears > Copy > Copy URL.\n"
+        f"\n(If the page did not open, copy this link into Chrome:\n{authorize_url}\n)\n"
+    )
+    while True:
+        url = input("  D. Paste it here and press Enter (quickly, it expires): ").strip()
+        code = extract_pkce_code(url)
+        if code:
+            return code, code_verifier
+        print("   No code= found in this URL, try again.")
+
+
 def save_to_ec2(bot_id: str, telegram_id: int, access: str, refresh: str) -> bool:
     """Store token + refresh_token for this user (mobile headers are kept as they are)."""
     payload = {
@@ -96,6 +120,8 @@ def main():
     ap.add_argument("--bot-id", required=True)
     ap.add_argument("--telegram-id", required=True, type=int)
     ap.add_argument("--from-file", help=f"save tokens from a {TOKENS_FILE} made on another machine")
+    ap.add_argument("--manual", action="store_true",
+                    help="log in from your own browser and paste the redirect URL (use if error 600010)")
     args = ap.parse_args()
 
     if not MOBILE_CLIENT_ID:
@@ -106,7 +132,7 @@ def main():
             data = json.load(f)
         access, refresh = data["token"], data["refresh_token"]
     else:
-        code, verifier = asyncio.run(human_login())
+        code, verifier = manual_login() if args.manual else asyncio.run(human_login())
         ok, access, refresh, note = exchange_pkce_code(code, verifier)
         if not ok:
             raise SystemExit(f"❌ Code exchange failed: {note}")

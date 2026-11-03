@@ -66,7 +66,8 @@ from .p2_client import (
 from .rides import _ride_interval
 from .timeparse import parse_iso_dt_or_none
 from .metrics import observe_ms
-from db import log_offer_decision, save_offer_message, set_token_status
+from db import log_offer_decision, save_offer_message, set_token_status, get_user_lang
+from .i18n import t
 
 
 def _quiet_print(*args, **kwargs):
@@ -384,6 +385,7 @@ def _on_reserve_done(future: concurrent.futures.Future, cand: dict):
     pickup_dt = cand.get("pickup")
     predicted_end = cand.get("predicted_end")
     cache_version = cand["cache_version"]
+    lang = get_user_lang(bot_id, telegram_id)
 
     try:
         rr = future.result()
@@ -422,7 +424,7 @@ def _on_reserve_done(future: concurrent.futures.Future, cand: dict):
             f"[{datetime.now()}] ❌ {platform.upper()} reserve {oid} -> {rs} "
             f"latency={int(rr.get('latency_ms') or 0)}ms body={rb}"
         )
-        na_header = _build_offer_header_line(offer_to_log, "not_accepted", platform, forced_accept=forced_accept)
+        na_header = _build_offer_header_line(offer_to_log, "not_accepted", platform, forced_accept=forced_accept, lang=lang)
         _log_offer_decision_async(bot_id, telegram_id, offer_to_log, "not_accepted", f"reserve_failed:{rs}", notify_text=na_header)
         if oid:
             mark_not_valid_cached(bot_id, telegram_id, platform, str(oid), cache_version=cache_version)
@@ -430,25 +432,25 @@ def _on_reserve_done(future: concurrent.futures.Future, cand: dict):
             rejected_per_user[bot_id][telegram_id][platform].add(oid)
         # 409/410: offer taken or gone — always notify the user regardless of who took it
         if rs in (409, 410):
-            na_reason = _reserve_failure_human_reason(rs, rb)
+            na_reason = _reserve_failure_human_reason(rs, rb, lang)
             details_key = uuid.uuid4().hex[:16]
             _save_offer_details_render_async(
                 bot_id, telegram_id, details_key, offer_to_log, "not_accepted",
                 na_reason, tz_name, filter_results=filter_results, platform=platform, forced_accept=forced_accept,
             )
-            na_kb = {"inline_keyboard": [[{"text": "Show details", "callback_data": f"show_offer:{details_key}"}]]}
+            na_kb = {"inline_keyboard": [[{"text": t(lang, "btn_show_details"), "callback_data": f"show_offer:{details_key}"}]]}
             _send_notification_async(bot_id, telegram_id, "not_accepted", na_header, platform, reply_markup=na_kb, force_notify=True)
     else:
         if pickup_dt is not None:
             add_ride_to_cache(bot_id, telegram_id, oid, pickup_dt, predicted_end)
-        header_line = _build_offer_header_line(offer_to_log, "accepted", platform, forced_accept=forced_accept)
+        header_line = _build_offer_header_line(offer_to_log, "accepted", platform, forced_accept=forced_accept, lang=lang)
         _log_offer_decision_async(bot_id, telegram_id, offer_to_log, "accepted", reason_for_log, notify_text=header_line)
         details_key = uuid.uuid4().hex[:16]
         _save_offer_details_render_async(
             bot_id, telegram_id, details_key, offer_to_log, "accepted",
             None, tz_name, filter_results=filter_results, platform=platform, forced_accept=forced_accept,
         )
-        kb = {"inline_keyboard": [[{"text": "Show details", "callback_data": f"show_offer:{details_key}"}]]}
+        kb = {"inline_keyboard": [[{"text": t(lang, "btn_show_details"), "callback_data": f"show_offer:{details_key}"}]]}
         _send_notification_async(bot_id, telegram_id, "accepted", header_line, platform, reply_markup=kb)
         if OFFER_MEMORY_DEDUPE:
             accepted_per_user[bot_id][telegram_id].add(oid)
@@ -463,14 +465,15 @@ def _on_reserve_done(future: concurrent.futures.Future, cand: dict):
                 p_fr = peer["filter_results"]
                 p_plat = peer["platform"]
                 p_fa = peer["forced_accept"]
-                peer_header = _build_offer_header_line(p_offer, "not_accepted", p_plat, forced_accept=p_fa)
+                p_lang = get_user_lang(p_bot_id, p_tid)
+                peer_header = _build_offer_header_line(p_offer, "not_accepted", p_plat, forced_accept=p_fa, lang=p_lang)
                 _log_offer_decision_async(p_bot_id, p_tid, p_offer, "not_accepted", f"peer_accepted:{bot_id}:{telegram_id}", notify_text=peer_header)
                 peer_key = uuid.uuid4().hex[:16]
                 _save_offer_details_render_async(
                     p_bot_id, p_tid, peer_key, p_offer, "not_accepted",
                     None, p_tz, filter_results=p_fr, platform=p_plat, forced_accept=p_fa,
                 )
-                peer_kb = {"inline_keyboard": [[{"text": "Show details", "callback_data": f"show_offer:{peer_key}"}]]}
+                peer_kb = {"inline_keyboard": [[{"text": t(p_lang, "btn_show_details"), "callback_data": f"show_offer:{peer_key}"}]]}
                 _send_notification_async(p_bot_id, p_tid, "not_accepted", peer_header, p_plat, reply_markup=peer_kb, force_notify=True)
 
     observe_ms("offer_end2end_ms", _poll_latency_ms(offer_to_log))
@@ -547,11 +550,13 @@ def _save_offer_details_render_async(
 
     def _job():
         try:
+            lang = get_user_lang(bot_id, telegram_id)
             header_line = _build_offer_header_line(
                 offer,
                 status,
                 platform,
                 forced_accept=forced_accept,
+                lang=lang,
             )
             full_text = _build_user_message(
                 offer,
@@ -561,6 +566,7 @@ def _save_offer_details_render_async(
                 filter_results=filter_results,
                 platform=platform,
                 forced_accept=forced_accept,
+                lang=lang,
             )
             save_offer_message(bot_id, telegram_id, message_key, header_line, full_text)
         except Exception:
@@ -605,7 +611,7 @@ def _poll_latency_ms(offer: dict) -> Optional[int]:
         return None
 
 
-def _reserve_failure_human_reason(status_code: Optional[int], body: Any) -> str:
+def _reserve_failure_human_reason(status_code: Optional[int], body: Any, lang: str = "en") -> str:
     text = ""
     if isinstance(body, dict):
         for k in ("detail", "message", "error", "title"):
@@ -623,22 +629,22 @@ def _reserve_failure_human_reason(status_code: Optional[int], body: Any) -> str:
 
     low = text.lower()
     if any(k in low for k in ("already taken", "already accepted", "not available", "no longer available")):
-        return "Offer deja prise par un autre chauffeur."
+        return t(lang, "rf_taken")
     if status_code == 409:
-        return "Conflit 409: offre deja prise."
+        return t(lang, "rf_409")
     if status_code == 410:
-        return "Offre expiree/supprimee (410): elle n'est plus reservable."
+        return t(lang, "rf_410")
     if status_code == 422:
-        return "Offre devenue invalide (422)."
+        return t(lang, "rf_422")
     if status_code in (401, 403):
-        return f"Session expiree (HTTP {status_code})."
+        return t(lang, "rf_auth", code=status_code)
     if status_code is not None and 500 <= int(status_code) < 600:
-        return f"Erreur serveur Blacklane (HTTP {status_code})."
+        return t(lang, "rf_5xx", code=status_code)
     if status_code is None:
         if "timeout" in low:
-            return "Timeout reseau pendant la reservation."
-        return "Erreur reseau pendant la reservation."
-    return f"Reservation refusee (HTTP {status_code})."
+            return t(lang, "rf_timeout")
+        return t(lang, "rf_network")
+    return t(lang, "rf_refused", code=status_code)
 
 
 def _build_user_message(
@@ -650,11 +656,12 @@ def _build_user_message(
     filter_results: Optional[List[dict]] = None,
     platform: Optional[str] = None,
     forced_accept: bool = False,
+    lang: str = "en",
 ) -> str:
     rid = (offer.get("rides") or [{}])[0]
     otype = (rid.get("type") or "").lower()
     vclass = (offer.get("vehicleClass") or "")
-    typ_disp = "transfer" if otype == "transfer" else ("hourly" if otype == "hourly" else "—")
+    typ_disp = t(lang, "val_transfer") if otype == "transfer" else (t(lang, "val_hourly") if otype == "hourly" else "—")
     price_disp = _fmt_money(offer.get("price"), offer.get("currency"))
     pu_addr = _extract_addr(rid.get("pickUpLocation"))
     do_addr = _extract_addr(rid.get("dropOffLocation")) if rid.get("dropOffLocation") else None
@@ -685,28 +692,28 @@ def _build_user_message(
     dist = _fmt_km(rid.get("estimatedDistanceMeters"))
     dur = _fmt_minutes(_duration_minutes_from_rid(rid))
     lines = [
-        f"🚘 <b>Type:</b> {_esc(typ_disp)}",
-        f"🚗 <b>Class:</b> {_esc(vclass)}",
-        f"💰 <b>Price:</b> {_esc(price_disp)}",
+        f"🚘 <b>{t(lang, 'lbl_type')}:</b> {_esc(typ_disp)}",
+        f"🚗 <b>{t(lang, 'lbl_class')}:</b> {_esc(vclass)}",
+        f"💰 <b>{t(lang, 'lbl_price')}:</b> {_esc(price_disp)}",
     ]
     if flight_no:
-        lines.append(f"✈️ <b>Flight number:</b> {_esc(flight_no)}")
+        lines.append(f"✈️ <b>{t(lang, 'lbl_flight')}:</b> {_esc(flight_no)}")
     if guest_reqs:
-        lines.append(f"👁️ <b>Special requests:</b> {_esc(guest_reqs)}")
+        lines.append(f"👁️ <b>{t(lang, 'lbl_requests')}:</b> {_esc(guest_reqs)}")
     if dist != "—":
-        lines.append(f"📏 <b>Distance:</b> {_esc(dist)}")
+        lines.append(f"📏 <b>{t(lang, 'lbl_distance')}:</b> {_esc(dist)}")
     if dur != "—":
-        lines.append(f"⏱️ <b>Duration:</b> {_esc(dur)}")
+        lines.append(f"⏱️ <b>{t(lang, 'lbl_duration')}:</b> {_esc(dur)}")
     lines += [
-        f"🕒 <b>Starts at:</b> {_esc(pickup_disp)}",
-        f"⏳ <b>Ends at:</b> {_esc(ends_disp)}",
+        f"🕒 <b>{t(lang, 'lbl_starts')}:</b> {_esc(pickup_disp)}",
+        f"⏳ <b>{t(lang, 'lbl_ends')}:</b> {_esc(ends_disp)}",
         "",
-        f"⬆️ <b>Pickup:</b>\n{_esc(pu_addr)}",
+        f"⬆️ <b>{t(lang, 'lbl_pickup')}:</b>\n{_esc(pu_addr)}",
     ]
     if do_addr:
-        lines += ["", f"⬇️ <b>Dropoff:</b>\n{_esc(do_addr)}"]
+        lines += ["", f"⬇️ <b>{t(lang, 'lbl_dropoff')}:</b>\n{_esc(do_addr)}"]
     if status in ("rejected", "not_accepted") and reason:
-        lines += ["", f"⚠️ <b>Reason:</b> {_esc(reason)}"]
+        lines += ["", f"⚠️ <b>{t(lang, 'lbl_reason')}:</b> {_esc(reason)}"]
 
     if status == "accepted":
         status_icon = "🟢"
@@ -716,16 +723,16 @@ def _build_user_message(
         status_icon = "🔴"
     plat_icon = _platform_icon(platform or "p1")
     if status == "accepted":
-        status_word = "Offer Accepted"
+        status_word = t(lang, "word_accepted")
     elif status == "not_accepted":
-        status_word = "Not Accepted"
+        status_word = t(lang, "word_not_accepted")
     else:
-        status_word = "not valid"
+        status_word = t(lang, "word_not_valid")
     if forced_accept and status == "accepted":
-        status_word = "valid (override)"
-    header = f"🔥 New offer - {price_disp} - {status_icon} {status_word} {plat_icon}"
+        status_word = t(lang, "word_override")
+    header = t(lang, "offer_header", price=price_disp, icon=status_icon, word=status_word, plat=plat_icon)
     body = "\n".join(lines)
-    filters_block = _format_filter_summary(filter_results or []) if filter_results else (filters_summary or "")
+    filters_block = _format_filter_summary(filter_results or [], lang) if filter_results else (filters_summary or "")
     parts = [header, body]
     if filters_block:
         parts.append(filters_block)
@@ -737,6 +744,7 @@ def _build_offer_header_line(
     status: str,
     platform: Optional[str],
     forced_accept: bool = False,
+    lang: str = "en",
 ) -> str:
     rid = (offer.get("rides") or [{}])[0]
     otype = (rid.get("type") or "").lower()
@@ -749,23 +757,23 @@ def _build_offer_header_line(
         status_icon = "🔴"
     plat_icon = _platform_icon(platform or "p1")
     if status == "accepted":
-        status_word = "Offer Accepted"
+        status_word = t(lang, "word_accepted")
     elif status == "not_accepted":
-        status_word = "Not Accepted"
+        status_word = t(lang, "word_not_accepted")
     else:
-        status_word = "not valid"
+        status_word = t(lang, "word_not_valid")
     if forced_accept and status == "accepted":
-        status_word = "valid (override)"
-    return f"🔥 New offer - {price_disp} - {status_icon} {status_word} {plat_icon}"
+        status_word = t(lang, "word_override")
+    return t(lang, "offer_header", price=price_disp, icon=status_icon, word=status_word, plat=plat_icon)
 
 
-def _build_reject_summary_lines(filter_results: List[dict]) -> str:
+def _build_reject_summary_lines(filter_results: List[dict], lang: str = "en") -> str:
     failed = [fr for fr in (filter_results or []) if not fr.get("ok")]
     if not failed:
         return ""
     lines = []
     for fr in failed:
-        detail = fr.get("detail") or fr.get("name") or "rejected"
+        detail = fr.get("detail") or fr.get("name") or t(lang, "rejected")
         lines.append(f"❌ {_esc(detail)}")
     return "\n".join(lines)
 
@@ -817,6 +825,7 @@ def _process_offers_for_user(
 ):
     if user_cfilters is None:
         user_cfilters = _get_enabled_filter_slugs(bot_id, telegram_id)
+    lang = get_user_lang(bot_id, telegram_id)
     pending_notifications: List[Tuple[str, str, str, Optional[dict], bool]] = []
     pending_intervals: List[Tuple[datetime, Optional[datetime]]] = []
 
@@ -902,7 +911,7 @@ def _process_offers_for_user(
         otype_dict = class_state.get(otype, {})
         matched_vc = next((cls for cls in otype_dict.keys() if cls.lower() == raw_vc.lower()), None)
         enabled = otype_dict.get(matched_vc, 0) if matched_vc else 0
-        record_result("Classe véhicule", bool(enabled), f"{otype} '{raw_vc}' désactivé" if not enabled else None)
+        record_result(t(lang, "f_class"), bool(enabled), t(lang, "d_class_disabled", otype=otype, vc=raw_vc) if not enabled else None)
 
         # --- 0b) Working hours & blocked days (user timezone) ---
         pickup_local = pickup.astimezone(gettz(tz_name))
@@ -917,16 +926,16 @@ def _process_offers_for_user(
                 start_t = dt_time(ws_hm[0], ws_hm[1])
                 end_t = dt_time(we_hm[0], we_hm[1])
                 if not (start_t <= pickup_t <= end_t):
-                    reason = f"heure pickup {pickup_t.strftime('%H:%M')} hors plage {ws}–{we}"
-                    record_result("Horaires", False, reason)
+                    reason = t(lang, "d_hours_out", t=pickup_t.strftime('%H:%M'), ws=ws, we=we)
+                    record_result(t(lang, "f_hours"), False, reason)
                 else:
-                    record_result("Horaires", True, f"{pickup_t.strftime('%H:%M')} dans {ws}–{we}")
+                    record_result(t(lang, "f_hours"), True, t(lang, "d_hours_in", t=pickup_t.strftime('%H:%M'), ws=ws, we=we))
 
         day_key = pickup_local.strftime("%d/%m/%Y")
         if day_key in blocked_days:
-            record_result("Jours bloqués", False, f"jour {day_key} bloqué (Schedule)")
+            record_result(t(lang, "f_blocked_days"), False, t(lang, "d_day_blocked", day=day_key))
         elif blocked_days:
-            record_result("Jours bloqués", True, f"{day_key} autorisé")
+            record_result(t(lang, "f_blocked_days"), True, t(lang, "d_day_allowed", day=day_key))
 
         # 1) Minimal gap before pickup vs current time (UTC base)
         gap_min_now = filters.get("gap", 0)
@@ -935,12 +944,12 @@ def _process_offers_for_user(
             mins_left = max(0, (pickup - now_utc).total_seconds() / 60)
             if pickup < now_utc + timedelta(minutes=float(gap_min_now)):
                 record_result(
-                    "Délai minimal",
+                    t(lang, "f_gap"),
                     False,
-                    f"{mins_left:.0f} min restants < seuil {gap_min_now} min",
+                    t(lang, "d_gap_fail", left=f"{mins_left:.0f}", gap=gap_min_now),
                 )
             else:
-                record_result("Délai minimal", True, f"{mins_left:.0f} min restants")
+                record_result(t(lang, "f_gap"), True, t(lang, "d_gap_ok", left=f"{mins_left:.0f}"))
 
         # 1.5) Enforce min/max hourly duration (filters in HOURS)
         dur_min_est = _duration_minutes_from_rid(rid)
@@ -959,37 +968,37 @@ def _process_offers_for_user(
             if min_minutes:
                 ok = not (dur_min_est is None or dur_min_est < min_minutes)
                 record_result(
-                    "Durée horaire min",
+                    t(lang, "f_hourly_min"),
                     ok,
-                    None if ok else f"{0 if dur_min_est is None else dur_min_est:.0f} min < min {min_minutes:.0f} min",
+                    None if ok else t(lang, "d_dur_min", dur=f"{0 if dur_min_est is None else dur_min_est:.0f}", min=f"{min_minutes:.0f}"),
                 )
             if max_minutes is not None and dur_min_est is not None:
                 ok = dur_min_est <= max_minutes
                 record_result(
-                    "Durée horaire max",
+                    t(lang, "f_hourly_max"),
                     ok,
-                    None if ok else f"{dur_min_est:.0f} min > max {max_minutes:.0f} min",
+                    None if ok else t(lang, "d_dur_max", dur=f"{dur_min_est:.0f}", max=f"{max_minutes:.0f}"),
                 )
 
         # Custom filters (user-defined)
-        decision, reason_txt = _run_custom_filters(offer, user_cfilters, tz_name)
+        decision, reason_txt = _run_custom_filters(offer, user_cfilters, tz_name, lang)
         if decision == "reject":
-            record_result("Filtres personnalisés", False, reason_txt or "rejeté")
+            record_result(t(lang, "f_custom"), False, reason_txt or t(lang, "rejected"))
         elif decision == "accept":
             accept_override = True
-            record_result("Filtres personnalisés", True, reason_txt or "accepté")
+            record_result(t(lang, "f_custom"), True, reason_txt or t(lang, "accepted"))
         elif user_cfilters:
-            record_result("Filtres personnalisés", True, "ok")
+            record_result(t(lang, "f_custom"), True, t(lang, "filter_ok"))
 
         # 2) Price filter
         min_p = float(filters.get("price_min", 0) or 0)
         max_p = float(filters.get("price_max", float("inf")))
         if min_p:
             ok = price >= min_p
-            record_result("Prix min", ok, None if ok else f"prix {price} < minimum {min_p}")
+            record_result(t(lang, "f_price_min"), ok, None if ok else t(lang, "d_price_min", price=price, min=min_p))
         if max_p != float("inf"):
             ok = price <= max_p
-            record_result("Prix max", ok, None if ok else f"prix {price} > maximum {max_p}")
+            record_result(t(lang, "f_price_max"), ok, None if ok else t(lang, "d_price_max", price=price, max=max_p))
 
         # 2.5) Distance filters
         if otype == "transfer":
@@ -1008,10 +1017,10 @@ def _process_offers_for_user(
 
                 if min_km:
                     ok = dist_m >= min_m
-                    record_result("Distance min", ok, None if ok else f"distance {dist_km:.1f} km < {min_km:g} km")
+                    record_result(t(lang, "f_dist_min"), ok, None if ok else t(lang, "d_dist_min", dist=f"{dist_km:.1f}", min=f"{min_km:g}"))
                 if max_km != float("inf"):
                     ok = dist_m <= max_m
-                    record_result("Distance max", ok, None if ok else f"distance {dist_km:.1f} km > {max_km:g} km")
+                    record_result(t(lang, "f_dist_max"), ok, None if ok else t(lang, "d_dist_max", dist=f"{dist_km:.1f}", max=f"{max_km:g}"))
         elif otype == "hourly":
             # Optional hourly km constraints if provided
             km_inc = rid.get("kmIncluded")
@@ -1024,10 +1033,10 @@ def _process_offers_for_user(
                 h_max_km = filters.get("max_hourly_km")
                 if h_min_km is not None:
                     ok = km_inc >= float(h_min_km)
-                    record_result("Km inclus min", ok, None if ok else f"{km_inc:g} < {float(h_min_km):g}")
+                    record_result(t(lang, "f_km_inc_min"), ok, None if ok else f"{km_inc:g} < {float(h_min_km):g}")
                 if h_max_km is not None:
                     ok = km_inc <= float(h_max_km)
-                    record_result("Km inclus max", ok, None if ok else f"{km_inc:g} > {float(h_max_km):g}")
+                    record_result(t(lang, "f_km_inc_max"), ok, None if ok else f"{km_inc:g} > {float(h_max_km):g}")
 
         # 3) Blacklists
         pickup_terms = (filters.get("pickup_blacklist") or [])
@@ -1040,10 +1049,10 @@ def _process_offers_for_user(
                 return None
             low = text.lower()
             for term in terms:
-                t = (term or "").strip()
-                if not t:
+                term_s = (term or "").strip()
+                if not term_s:
                     continue
-                tl = t.lower()
+                tl = term_s.lower()
                 # If the term is a single word (no spaces/special chars), match
                 # only on word boundaries to avoid "us" matching inside "guest".
                 # If the term is a phrase, fall back to plain substring match.
@@ -1059,11 +1068,11 @@ def _process_offers_for_user(
 
         hit_pu = _first_blacklist_hit(pu_addr, pickup_terms)
         if pickup_terms:
-            record_result("Pickup blacklist", hit_pu is None, None if hit_pu is None else f"pickup contient «{hit_pu}»")
+            record_result(t(lang, "f_pickup_bl"), hit_pu is None, None if hit_pu is None else t(lang, "d_pickup_hit", term=hit_pu))
 
         hit_do = _first_blacklist_hit(do_addr, dropoff_terms) if do_addr else None
         if dropoff_terms and do_addr:
-            record_result("Dropoff blacklist", hit_do is None, None if hit_do is None else f"dropoff contient «{hit_do}»")
+            record_result(t(lang, "f_dropoff_bl"), hit_do is None, None if hit_do is None else t(lang, "d_dropoff_hit", term=hit_do))
 
         # 3.5) Flight blocklist
         flight_terms = (filters.get("flight_blacklist") or [])
@@ -1078,10 +1087,10 @@ def _process_offers_for_user(
 
             if flight_no:
                 target = _norm_flight(flight_no)
-                hit = next((t for t in flight_terms if _norm_flight(t) == target and target), None)
-                record_result("Vols bloqués", hit is None, None if hit is None else f"vol {flight_no} bloqué")
+                hit = next((ft for ft in flight_terms if _norm_flight(ft) == target and target), None)
+                record_result(t(lang, "f_flights"), hit is None, None if hit is None else t(lang, "d_flight_blocked", flight=flight_no))
             else:
-                record_result("Vols bloqués", True, "aucun numéro de vol")
+                record_result(t(lang, "f_flights"), True, t(lang, "d_no_flight"))
 
         # 5) Booked-slots (user tz) – overlap using start & end
         ends_at_iso = rid.get("endsAt")
@@ -1101,14 +1110,17 @@ def _process_offers_for_user(
                 if start_local <= pickup_local <= end_local:
                     overlap = True
             if overlap:
-                slot_name = slot.get("name") or "Sans nom"
-                conflict_reason = (
-                    f"tombe dans créneau bloqué «{slot_name}» "
-                    f"({start_local.strftime('%Y-%m-%d %H:%M')} → {end_local.strftime('%Y-%m-%d %H:%M')})"
+                slot_name = slot.get("name") or t(lang, "d_slot_unnamed")
+                conflict_reason = t(
+                    lang,
+                    "d_slot_conflict",
+                    name=slot_name,
+                    start=start_local.strftime('%Y-%m-%d %H:%M'),
+                    end=end_local.strftime('%Y-%m-%d %H:%M'),
                 )
                 break
         if booked_slots:
-            record_result("Créneaux bloqués", conflict_reason is None, conflict_reason)
+            record_result(t(lang, "f_booked_slots"), conflict_reason is None, conflict_reason)
 
         # 5.5) Conflict with already accepted offers (busy intervals)
         # Skip this offer's own entries (same offer id seen on P1 and P2).
@@ -1117,13 +1129,15 @@ def _process_offers_for_user(
         conflict_with = _find_conflict(pickup, ends_at_iso, effective_busy_intervals)
         if conflict_with:
             a_start, a_end = conflict_with
-            conflict_text = (
-                "conflit avec une course acceptée "
-                f"({_fmt_dt_local_from_dt(a_start, tz_name)} – {_fmt_dt_local_from_dt(a_end, tz_name)})"
+            conflict_text = t(
+                lang,
+                "d_conflict",
+                start=_fmt_dt_local_from_dt(a_start, tz_name),
+                end=_fmt_dt_local_from_dt(a_end, tz_name),
             )
-            record_result("Conflit trajets acceptés", False, conflict_text)
+            record_result(t(lang, "f_conflict"), False, conflict_text)
         elif effective_busy_intervals:
-            record_result("Conflit trajets acceptés", True, "aucun conflit")
+            record_result(t(lang, "f_conflict"), True, t(lang, "d_no_conflict"))
 
         # --- Final decision based on accumulated filters ---
         failed_filters = [fr for fr in filter_results if not fr["ok"]]
@@ -1131,7 +1145,7 @@ def _process_offers_for_user(
 
         forced_accept_reason = None
         if accept_override and failed_filters:
-            forced_accept_reason = f"accepté (filtre personnalisé) malgré: {base_reason}"
+            forced_accept_reason = t(lang, "forced_accept", reason=base_reason)
 
         is_rejected = bool(failed_filters) and not accept_override
         reason_for_log = forced_accept_reason or base_reason
@@ -1156,10 +1170,10 @@ def _process_offers_for_user(
                 )
                 observe_ms("offer_end2end_ms", _poll_latency_ms(offer))
                 continue
-            header_line = _build_offer_header_line(offer, "rejected", platform, forced_accept=False)
-            reject_lines = _build_reject_summary_lines(filter_results)
+            header_line = _build_offer_header_line(offer, "rejected", platform, forced_accept=False, lang=lang)
+            reject_lines = _build_reject_summary_lines(filter_results, lang)
             notify_text = f"{header_line}\n{reject_lines}" if reject_lines else header_line
-            _log_offer_decision_async(bot_id, telegram_id, offer, "rejected", reason_for_log or "filtres non respectés", notify_text=notify_text)
+            _log_offer_decision_async(bot_id, telegram_id, offer, "rejected", reason_for_log or t(lang, "filters_not_met"), notify_text=notify_text)
             if FAST_ACCEPT_MODE:
                 # In race mode, still keep "Show details" so users can inspect rejected offers.
                 if FAST_ACCEPT_NOTIFY_REJECTED:
@@ -1176,7 +1190,7 @@ def _process_offers_for_user(
                         platform=platform,
                         forced_accept=False,
                     )
-                    kb = {"inline_keyboard": [[{"text": "Show details", "callback_data": f"show_offer:{details_key}"}]]}
+                    kb = {"inline_keyboard": [[{"text": t(lang, "btn_show_details"), "callback_data": f"show_offer:{details_key}"}]]}
                     _queue_notification("rejected", notify_text, platform, reply_markup=kb, force_notify=True)
                 if OFFER_MEMORY_DEDUPE:
                     rejected_per_user[bot_id][telegram_id][platform].add(oid)
@@ -1195,7 +1209,7 @@ def _process_offers_for_user(
                 platform=platform,
                 forced_accept=False,
             )
-            kb = {"inline_keyboard": [[{"text": "Show details", "callback_data": f"show_offer:{details_key}"}]]}
+            kb = {"inline_keyboard": [[{"text": t(lang, "btn_show_details"), "callback_data": f"show_offer:{details_key}"}]]}
             _queue_notification("rejected", notify_text, platform, reply_markup=kb, force_notify=True)
             if OFFER_MEMORY_DEDUPE:
                 rejected_per_user[bot_id][telegram_id][platform].add(oid)
@@ -1305,13 +1319,13 @@ def _process_offers_for_user(
             # Treat as accepted immediately (dry-run or no-token-yet)
             if AUTO_RESERVE_ENABLED:
                 # Has reserve enabled but couldn't submit (no token) — not_accepted
-                na_header = _build_offer_header_line(offer, "not_accepted", platform, forced_accept=bool(accept_override and failed_filters))
+                na_header = _build_offer_header_line(offer, "not_accepted", platform, forced_accept=bool(accept_override and failed_filters), lang=lang)
                 _log_offer_decision_async(bot_id, telegram_id, offer, "not_accepted", "no_token_for_reserve", notify_text=na_header)
                 if oid:
                     mark_not_valid_cached(bot_id, telegram_id, platform, str(oid), cache_version=cache_version)
             else:
                 # Dry-run: notify as accepted without reserving
-                header_line = _build_offer_header_line(offer, "accepted", platform, forced_accept=bool(accept_override and failed_filters))
+                header_line = _build_offer_header_line(offer, "accepted", platform, forced_accept=bool(accept_override and failed_filters), lang=lang)
                 _log_offer_decision_async(bot_id, telegram_id, offer, "accepted", reason_for_log, notify_text=header_line)
                 details_key = uuid.uuid4().hex[:16]
                 _save_offer_details_render_async(
@@ -1319,7 +1333,7 @@ def _process_offers_for_user(
                     None, tz_name, filter_results=filter_results, platform=platform,
                     forced_accept=bool(accept_override and failed_filters),
                 )
-                kb = {"inline_keyboard": [[{"text": "Show details", "callback_data": f"show_offer:{details_key}"}]]}
+                kb = {"inline_keyboard": [[{"text": t(lang, "btn_show_details"), "callback_data": f"show_offer:{details_key}"}]]}
                 _queue_notification("accepted", header_line, platform, reply_markup=kb)
                 if pickup is not None:
                     accepted_intervals.append((pickup, predicted_end))

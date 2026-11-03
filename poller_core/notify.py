@@ -5,7 +5,9 @@ from datetime import datetime
 
 from .config import BOT_TOKEN
 from .utils import _split_chunks, _strip_html_tags
+from .i18n import t
 from db import (
+    get_user_lang,
     get_notifications,
     get_bot_token,
     get_pinned_warnings,
@@ -225,11 +227,9 @@ def pin_warning_if_needed(bot_id: str, telegram_id: int, kind: str):
     if other_id:
         tg_unpin_message(bot_token, telegram_id, other_id)
         clear_pinned_warning(bot_id, telegram_id, other)
-    if kind == "no_token":
-        text = "⚠️ <b>Bot Issue</b>: no mobile session\n\nPlease add your mobile session token."
-    else:
-        text = "⚠️ <b>Bot Issue</b>: mobile session expired\n\nPlease update your mobile session token."
-    markup = {"inline_keyboard": [[{"text": "➕ Add/Update mobile session", "callback_data": "add_mobile_session"}]]}
+    lang = get_user_lang(bot_id, telegram_id)
+    text = t(lang, "warn_no_token") if kind == "no_token" else t(lang, "warn_expired")
+    markup = {"inline_keyboard": [[{"text": t(lang, "btn_add_session"), "callback_data": "add_mobile_session"}]]}
     message_id = tg_send_message(bot_token, telegram_id, text, reply_markup=markup)
     if message_id:
         tg_pin_message(bot_token, telegram_id, message_id)

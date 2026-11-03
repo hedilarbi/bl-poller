@@ -68,6 +68,7 @@ from .processing import debug_print_offers, _process_offers_for_user, _init_ride
 from .p1_client import warmup_p1_reserve_connection
 from .filters import _get_enabled_filter_slugs
 from .metrics import observe_ms
+from .i18n import t as _t
 from .notify import (
     pin_warning_if_needed,
     unpin_warning_if_any,
@@ -456,8 +457,7 @@ def poll_user(user):
         tg_send_message(
             _resolve_bot_token(bot_id, telegram_id),
             telegram_id,
-            "⚠️ <b>Blacklane asks for a human verification (captcha)</b> — the bot can't log in "
-            "by itself. Please send a new token.",
+            _t(_db_shim.get_user_lang(bot_id, telegram_id), "captcha"),
         )
 
     def _try_p1_oauth_refresh(reason: str) -> bool:
@@ -588,7 +588,7 @@ def poll_user(user):
                         unpin_warning_if_any(bot_id, telegram_id, "expired")
                         unpin_warning_if_any(bot_id, telegram_id, "no_token")
                         bot_tok = _resolve_bot_token(bot_id, telegram_id)
-                        tg_send_message(bot_tok, telegram_id, "✅ <b>Token refreshed successfully</b> — bot is back online.")
+                        tg_send_message(bot_tok, telegram_id, _t(_db_shim.get_user_lang(bot_id, telegram_id), "token_refreshed"))
                         _log_offers_found("P1", telegram_id, results2 or [])
                         return results2 or []
                 if pw_note == PLAYWRIGHT_CAPTCHA_NOTE:
@@ -688,7 +688,7 @@ def poll_user(user):
                         unpin_warning_if_any(bot_id, telegram_id, "expired")
                         unpin_warning_if_any(bot_id, telegram_id, "no_token")
                         bot_tok = _resolve_bot_token(bot_id, telegram_id)
-                        tg_send_message(bot_tok, telegram_id, "✅ <b>Token refreshed successfully</b> — bot is back online.")
+                        tg_send_message(bot_tok, telegram_id, _t(_db_shim.get_user_lang(bot_id, telegram_id), "token_refreshed"))
                         _log_offers_found("P1", telegram_id, results2 or [])
                         return results2 or []
                     if status_code2 is None:

@@ -104,6 +104,12 @@ def get_user_timezone(bot_id, telegram_id) -> str:
     return _get_cfg(bot_id, telegram_id).get("tz_name") or "UTC"
 
 
+def get_user_lang(bot_id, telegram_id) -> str:
+    # Older API versions don't send "lang": fall back to English.
+    lang = _get_cfg(bot_id, telegram_id).get("lang")
+    return lang if lang in ("en", "fr") else "en"
+
+
 def get_mobile_headers(bot_id, telegram_id) -> Optional[dict]:
     return _get_cfg(bot_id, telegram_id).get("mobile_headers")
 
