@@ -867,7 +867,6 @@ def _process_offers_for_user(
     lang = get_user_lang(bot_id, telegram_id)
     pending_notifications: List[Tuple[str, str, str, Optional[dict], bool]] = []
     pending_intervals: List[Tuple[datetime, Optional[datetime]]] = []
-    cycle_accepts: List[Tuple[datetime, Optional[datetime]]] = []  # dry-run accepts this cycle (floating)
 
     def _queue_notification(
         kind: str,
@@ -1170,7 +1169,10 @@ def _process_offers_for_user(
         # selection). If no selection, or none are live, fall back to the legacy single-slot check.
         pool = [c for c in (operation_chauffeurs or []) if (live_drivers is None or c in live_drivers)]
         if operation_chauffeurs and pool:
-            floating = local_busy + pending_intervals + current_cycle_intervals + cycle_accepts
+            # pending_intervals already holds every offer accepted earlier THIS cycle (it is
+            # appended for each non-rejected offer below). current_cycle_intervals holds the same
+            # slots, so adding both would double-count them against capacity and wrongly reject.
+            floating = local_busy + pending_intervals
             busy_tagged = list(scheduled_tagged or []) + [(s, e, "unassigned") for (s, e) in floating]
             conflict_with = capacity_conflict(pickup, ends_at_iso, busy_tagged, pool)
             had_busy = bool(busy_tagged)
@@ -1388,7 +1390,6 @@ def _process_offers_for_user(
                 _queue_notification("accepted", header_line, platform, reply_markup=kb)
                 if pickup is not None:
                     accepted_intervals.append((pickup, predicted_end))
-                    cycle_accepts.append((pickup, predicted_end))
 
         # Guard same-cycle overlap: mark time slot as pending even before reserve confirms
         pending_intervals.append((pickup, predicted_end))

@@ -116,6 +116,11 @@ def get_operation_chauffeurs(bot_id, telegram_id) -> list:
     return [str(x) for x in val] if isinstance(val, list) else []
 
 
+def get_operation_chauffeurs_enabled(bot_id, telegram_id) -> bool:
+    # Admin-toggled feature flag. When False the poller keeps the legacy single-slot behaviour.
+    return bool(_get_cfg(bot_id, telegram_id).get("operation_chauffeurs_enabled"))
+
+
 def get_mobile_headers(bot_id, telegram_id) -> Optional[dict]:
     return _get_cfg(bot_id, telegram_id).get("mobile_headers")
 

@@ -94,6 +94,7 @@ from db import (
     get_mobile_headers,
     get_token_auto_refresh,
     get_operation_chauffeurs,
+    get_operation_chauffeurs_enabled,
 )
 
 
@@ -319,7 +320,8 @@ def poll_user(user):
         bl_uuid = runtime_cached.get("bl_uuid")
         email = runtime_cached.get("email")
         password = runtime_cached.get("password")
-        operation_chauffeurs = runtime_cached.get("operation_chauffeurs") or []
+        # Feature flag off → behave exactly like before (no capacity/matching).
+        operation_chauffeurs = (runtime_cached.get("operation_chauffeurs") or []) if runtime_cached.get("operation_chauffeurs_enabled") else []
     else:
         # VPS: fetch all user config in one API call and prime the shim so
         # every getter below reads from local memory instead of the network.
@@ -336,7 +338,9 @@ def poll_user(user):
         blocked_days = {d["day"] for d in get_blocked_days(bot_id, telegram_id)}
         bl_uuid = get_bl_uuid(bot_id, telegram_id)
         email, password = _read_portal_creds(bot_id, telegram_id)
-        operation_chauffeurs = get_operation_chauffeurs(bot_id, telegram_id) or []
+        op_enabled = get_operation_chauffeurs_enabled(bot_id, telegram_id)
+        op_chauffeurs_raw = get_operation_chauffeurs(bot_id, telegram_id) or []
+        operation_chauffeurs = op_chauffeurs_raw if op_enabled else []
         set_user_runtime_cache(
             bot_id,
             telegram_id,
@@ -352,7 +356,8 @@ def poll_user(user):
                 "bl_uuid": bl_uuid,
                 "email": email,
                 "password": password,
-                "operation_chauffeurs": operation_chauffeurs,
+                "operation_chauffeurs": op_chauffeurs_raw,
+                "operation_chauffeurs_enabled": op_enabled,
             },
         )
 
