@@ -110,6 +110,12 @@ def get_user_lang(bot_id, telegram_id) -> str:
     return lang if lang in ("en", "fr") else "en"
 
 
+def get_operation_chauffeurs(bot_id, telegram_id) -> list:
+    # Chosen fleet chauffeurs for the capacity/conflict check. Empty = legacy single-slot behaviour.
+    val = _get_cfg(bot_id, telegram_id).get("operation_chauffeurs")
+    return [str(x) for x in val] if isinstance(val, list) else []
+
+
 def get_mobile_headers(bot_id, telegram_id) -> Optional[dict]:
     return _get_cfg(bot_id, telegram_id).get("mobile_headers")
 

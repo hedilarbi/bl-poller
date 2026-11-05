@@ -732,6 +732,61 @@ def get_planned_rides_p2_with_login(bot_id: str, telegram_id: int, email: str, p
     return get_planned_rides_p2(tok)
 
 
+def _athena_get_drivers(access_token: str):
+    """GET /hades/drivers → (status, payload_or_None)."""
+    url = f"{ATHENA_BASE}/hades/drivers"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.api+json",
+        "Connection": "keep-alive",
+        "User-Agent": "BLPortal/1.0 (+poller)",
+    }
+    try:
+        r = _session_request("GET", url, headers=headers, timeout=P2_POLL_TIMEOUT_S)
+        if 200 <= r.status_code < 300:
+            try:
+                return r.status_code, r.json()
+            except Exception:
+                return r.status_code, None
+        return r.status_code, None
+    except requests.exceptions.RequestException as e:
+        print(f"[{datetime.now()}] ❌ Athena drivers error: {e}")
+        return None, None
+
+
+def _parse_live_driver_ids(payload: dict) -> set:
+    """Driver ids that can actually drive: role 'driver' AND state 'live'."""
+    out = set()
+    for d in ((payload or {}).get("data") or []):
+        if not isinstance(d, dict):
+            continue
+        a = d.get("attributes") or {}
+        roles = a.get("roles") or []
+        if "driver" in roles and a.get("state") == "live":
+            out.add(str(d.get("id")))
+    return out
+
+
+def get_fleet_driver_ids_p2_with_login(bot_id: str, telegram_id: int, email: str, password: str) -> Optional[set]:
+    """Live fleet chauffeur ids via Athena /hades/drivers, with the same login/retry flow as
+    the schedule fetch. Returns a set of ids, or None if the call failed (caller keeps the
+    previous value / falls back to the stored selection)."""
+    tok = get_portal_token_mem(bot_id, telegram_id) or _ensure_portal_token(bot_id, telegram_id, email, password)
+    if tok:
+        status, payload = _athena_get_drivers(tok)
+        if status not in (401, 403) and payload is not None:
+            return _parse_live_driver_ids(payload)
+        if status not in (401, 403):
+            return None
+    ok, tok, _note = _athena_login(email, password)
+    if not (ok and tok):
+        return None
+    update_portal_token(bot_id, telegram_id, tok)
+    set_portal_token_mem(bot_id, telegram_id, tok)
+    status, payload = _athena_get_drivers(tok)
+    return _parse_live_driver_ids(payload) if payload is not None else None
+
+
 def _map_athena_ride(raw: dict) -> dict:
     """Flatten an Athena JSON:API ride into the shape _extract_intervals_from_rides reads."""
     attrs = raw.get("attributes") or {}

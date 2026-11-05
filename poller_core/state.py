@@ -75,23 +75,55 @@ def is_token_invalid(bot_id: str, telegram_id: int, token: Optional[str], cache_
 
 # ── Rides cache helpers ────────────────────────────────────────────────────────
 
+def _as3(v) -> Tuple[datetime, Optional[datetime], Optional[str]]:
+    """Normalize a cache ride value to (start, end, driver), tolerating legacy 2-tuples."""
+    if isinstance(v, tuple):
+        if len(v) >= 3:
+            return v[0], v[1], v[2]
+        if len(v) == 2:
+            return v[0], v[1], None
+    return v, None, None
+
+
 def get_rides_intervals(bot_id: str, telegram_id: int) -> Optional[List[Tuple[datetime, Optional[datetime]]]]:
     """Return None if /rides hasn't been fetched yet, or the list of (pickup, end) intervals."""
     entry = _rides_cache.get((str(bot_id), int(telegram_id)))
     if not entry or not entry.get("fetched"):
         return None
-    return list(entry["rides"].values())
+    return [(_as3(v)[0], _as3(v)[1]) for v in entry["rides"].values()]
 
 
-def set_rides_fetched(bot_id: str, telegram_id: int, rides_dict: Dict[str, Tuple[datetime, Optional[datetime]]]):
-    """Store the initial /rides result (keyed by ride_id)."""
+def get_rides_tagged(bot_id: str, telegram_id: int) -> Optional[List[Tuple[datetime, Optional[datetime], Optional[str]]]]:
+    """Scheduled rides as (pickup, end, driver_tag); None if never fetched. driver_tag is a
+    chosen driver id (pinned) or 'unassigned'/None (floating)."""
+    entry = _rides_cache.get((str(bot_id), int(telegram_id)))
+    if not entry or not entry.get("fetched"):
+        return None
+    return [_as3(v) for v in entry["rides"].values()]
+
+
+def get_live_drivers(bot_id: str, telegram_id: int) -> Optional[set]:
+    """Live fleet driver ids from the last refresh, or None if not fetched / unavailable."""
+    entry = _rides_cache.get((str(bot_id), int(telegram_id)))
+    if not entry:
+        return None
+    live = entry.get("live_drivers")
+    return set(live) if live is not None else None
+
+
+def set_rides_fetched(bot_id: str, telegram_id: int, rides_dict: Dict[str, Tuple], live_drivers: Optional[set] = None):
+    """Store the /rides result (keyed by ride_id). Values may be (start, end) or
+    (start, end, driver). live_drivers (when provided) is the live fleet set for capacity."""
     key = (str(bot_id), int(telegram_id))
     now = time.time()
+    prev = _rides_cache.get(key) or {}
     _rides_cache[key] = {
         "rides": dict(rides_dict),
         "fetched": True,
         "last_fetch": now,
         "last_cleanup": now,
+        # Keep the previous live set when this refresh didn't (re)fetch it.
+        "live_drivers": set(live_drivers) if live_drivers is not None else prev.get("live_drivers"),
     }
 
 
@@ -111,7 +143,8 @@ def add_ride_to_cache(bot_id: str, telegram_id: int, ride_id: str, pickup_dt: da
     key = (str(bot_id), int(telegram_id))
     entry = _rides_cache.get(key)
     if entry and entry.get("fetched"):
-        entry["rides"][str(ride_id)] = (pickup_dt, end_dt)
+        # The bot's own just-reserved ride is not dispatched to a specific chauffeur yet → floating.
+        entry["rides"][str(ride_id)] = (pickup_dt, end_dt, "unassigned")
 
 
 # ── Locally reserved rides ─────────────────────────────────────────────────────
@@ -243,11 +276,13 @@ def maybe_cleanup_rides(bot_id: str, telegram_id: int):
     if now_ts - entry.get("last_cleanup", 0.0) < _RIDES_CLEANUP_INTERVAL_S:
         return
     cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
-    entry["rides"] = {
-        k: (s, e)
-        for k, (s, e) in entry["rides"].items()
-        if (e or s).replace(tzinfo=timezone.utc if (e or s).tzinfo is None else (e or s).tzinfo) > cutoff
-    }
+    kept = {}
+    for k, v in entry["rides"].items():
+        s, e, d = _as3(v)
+        ref = e or s
+        if ref.replace(tzinfo=timezone.utc if ref.tzinfo is None else ref.tzinfo) > cutoff:
+            kept[k] = (s, e, d)
+    entry["rides"] = kept
     entry["last_cleanup"] = now_ts
 
 
@@ -256,7 +291,7 @@ def get_rides_cache(bot_id: str, telegram_id: int):
     entry = _rides_cache.get((str(bot_id), int(telegram_id)))
     if not entry or not entry.get("fetched"):
         return None, None
-    return list(entry["rides"].values()), entry.get("last_cleanup", 0.0)
+    return [(_as3(v)[0], _as3(v)[1]) for v in entry["rides"].values()], entry.get("last_cleanup", 0.0)
 
 
 def get_offers_etag(bot_id: str, telegram_id: int) -> Optional[str]:

@@ -61,8 +61,10 @@ from .p2_client import (
     _filter_rides_by_bl_uuid,
     _map_athena_ride,
     get_planned_rides_p2_with_login,
+    get_fleet_driver_ids_p2_with_login,
     reserve_offer_p2,
 )
+from .capacity import capacity_conflict
 from .rides import _ride_interval
 from .timeparse import parse_iso_dt_or_none
 from .metrics import observe_ms
@@ -77,6 +79,17 @@ def _quiet_print(*args, **kwargs):
 print = _quiet_print
 
 
+def _fetch_live_drivers(bot_id, telegram_id, operation_chauffeurs, email, password) -> Optional[set]:
+    """Live fleet driver ids (for capacity). Only in fleet mode with portal creds; None otherwise
+    or on failure — the cache then keeps the previously known live set."""
+    if not operation_chauffeurs or not (email and password):
+        return None
+    try:
+        return get_fleet_driver_ids_p2_with_login(bot_id, telegram_id, email, password)
+    except Exception:
+        return None
+
+
 def _refresh_rides_cache_now(
     bot_id: str,
     telegram_id: int,
@@ -88,14 +101,17 @@ def _refresh_rides_cache_now(
     portal_email: Optional[str] = None,
     portal_password: Optional[str] = None,
     filters: Optional[dict] = None,
+    operation_chauffeurs: Optional[list] = None,
 ):
     rides = _fetch_scheduled_rides(
         bot_id, telegram_id, tz_name, p1_token, p1_headers, bl_uuid, portal_email, portal_password, filters,
+        operation_chauffeurs,
     )
+    live = _fetch_live_drivers(bot_id, telegram_id, operation_chauffeurs, portal_email, portal_password)
     # On failure keep the previous rides. Replacing them with [] (old behavior) made every
     # accepted ride invisible to the conflict check until the next refresh.
     if rides is not None:
-        set_rides_fetched(bot_id, telegram_id, rides)
+        set_rides_fetched(bot_id, telegram_id, rides, live_drivers=live)
 
 
 def _fetch_scheduled_rides(
@@ -108,7 +124,8 @@ def _fetch_scheduled_rides(
     portal_email: Optional[str],
     portal_password: Optional[str],
     filters: Optional[dict],
-) -> Optional[Dict[str, Tuple[datetime, Optional[datetime]]]]:
+    operation_chauffeurs: Optional[list] = None,
+) -> Optional[Dict[str, Tuple[datetime, Optional[datetime], Optional[str]]]]:
     """Scheduled rides as {key: (pickup, end)}, or None if the source failed.
 
     Same source as the current-schedule page: Athena /hades/rides (planned) when BL
@@ -122,18 +139,29 @@ def _fetch_scheduled_rides(
         if data is None:
             _builtins.print(f"[{datetime.now()}] ⚠️ scheduled rides [{source}] fetch failed ({status_code}) — keeping previous rides")
             return None
-        # Keep rides assigned to this chauffeur AND rides not assigned to anyone yet (e.g. just
-        # accepted on P2, not dispatched): blocking such a slot is safer than double-booking.
+        # Fleet mode (operation_chauffeurs set): keep rides assigned to a SELECTED chauffeur
+        # (pinned) plus unassigned rides (float onto any selected driver); drop rides assigned
+        # to a non-selected driver. Legacy mode (no selection): keep this account's rides +
+        # unassigned, exactly as before. Blocking an unassigned slot is safer than double-booking.
+        op_set = {str(c) for c in (operation_chauffeurs or [])}
         rides = []
         for raw in data:
             if not isinstance(raw, dict):
                 continue
             driver = _athena_assigned_driver_id(raw)
-            if bl_uuid and driver not in (None, str(bl_uuid)):
-                dropped.append((str(raw.get("id")), f"assigned to another driver ({driver})"))
-                continue
+            driver = str(driver) if driver else None
+            if op_set:
+                if driver is not None and driver not in op_set:
+                    dropped.append((str(raw.get("id")), f"assigned to a non-selected driver ({driver})"))
+                    continue
+                tag = driver if driver else "unassigned"
+            else:
+                if bl_uuid and driver not in (None, str(bl_uuid)):
+                    dropped.append((str(raw.get("id")), f"assigned to another driver ({driver})"))
+                    continue
+                tag = "me" if (driver and driver == str(bl_uuid)) else (driver or "unassigned")
             ride = _map_athena_ride(raw)
-            ride["_driver"] = "me" if (driver and driver == str(bl_uuid)) else (driver or "unassigned")
+            ride["_driver"] = tag
             rides.append(ride)
         raw_count = len(data)
     elif p1_token:
@@ -161,7 +189,7 @@ def _fetch_scheduled_rides(
             dropped.append((str(r.get("id")), "no pickup time"))
             continue
         start, end, how = iv
-        out[f"{source}_{r.get('id') or i}"] = (start, end)
+        out[f"{source}_{r.get('id') or i}"] = (start, end, r.get("_driver") or "unassigned")
         lines.append((start, (
             f"   ✅ {r.get('id')} | {r.get('rideType') or r.get('type')} | {r.get('rideStatus')} | "
             f"driver={r.get('_driver')} | {_fmt_local(start, tz_name)} → {_fmt_local(end, tz_name)} | {how}"
@@ -195,7 +223,8 @@ def _log_scheduled_rides(
     """Full detail on first fetch and whenever a ride or a computed end changes; one line otherwise."""
     sig = (
         source,
-        tuple(sorted((k, s.isoformat(), e.isoformat() if e else None) for k, (s, e) in out.items())),
+        tuple(sorted((k, v[0].isoformat(), v[1].isoformat() if v[1] else None, v[2] if len(v) > 2 else None)
+                     for k, v in out.items())),
         tuple(sorted(dropped)),
     )
     key = (str(bot_id), int(telegram_id))
@@ -234,6 +263,7 @@ def _refresh_rides_cache_async(
     portal_email: Optional[str] = None,
     portal_password: Optional[str] = None,
     filters: Optional[dict] = None,
+    operation_chauffeurs: Optional[list] = None,
 ):
     def _job():
         try:
@@ -248,6 +278,7 @@ def _refresh_rides_cache_async(
                 portal_email=portal_email,
                 portal_password=portal_password,
                 filters=filters,
+                operation_chauffeurs=operation_chauffeurs,
             )
         except Exception:
             invalidate_rides_cache(bot_id, telegram_id)
@@ -266,6 +297,7 @@ def _init_rides_cache_now(
     portal_email: Optional[str] = None,
     portal_password: Optional[str] = None,
     filters: Optional[dict] = None,
+    operation_chauffeurs: Optional[list] = None,
 ):
     """Fetch scheduled rides once. Called on first poll only.
 
@@ -274,8 +306,10 @@ def _init_rides_cache_now(
     """
     rides = _fetch_scheduled_rides(
         bot_id, telegram_id, tz_name, p1_token, p1_headers, bl_uuid, portal_email, portal_password, filters,
+        operation_chauffeurs,
     )
-    set_rides_fetched(bot_id, telegram_id, rides or {})
+    live = _fetch_live_drivers(bot_id, telegram_id, operation_chauffeurs, portal_email, portal_password)
+    set_rides_fetched(bot_id, telegram_id, rides or {}, live_drivers=live)
 
 
 def _init_rides_cache_async(
@@ -289,6 +323,7 @@ def _init_rides_cache_async(
     portal_email: Optional[str] = None,
     portal_password: Optional[str] = None,
     filters: Optional[dict] = None,
+    operation_chauffeurs: Optional[list] = None,
 ):
     # poll_user calls this every cycle until the cache is filled: submit one job at a time.
     key = (str(bot_id), int(telegram_id))
@@ -310,6 +345,7 @@ def _init_rides_cache_async(
                 portal_email=portal_email,
                 portal_password=portal_password,
                 filters=filters,
+                operation_chauffeurs=operation_chauffeurs,
             )
         except Exception:
             invalidate_rides_cache(bot_id, telegram_id)
@@ -822,12 +858,16 @@ def _process_offers_for_user(
     user_cfilters: Optional[dict] = None,
     portal_email: Optional[str] = None,
     portal_password: Optional[str] = None,
+    operation_chauffeurs: Optional[list] = None,
+    scheduled_tagged: Optional[List[Tuple[datetime, Optional[datetime], Optional[str]]]] = None,
+    live_drivers: Optional[set] = None,
 ):
     if user_cfilters is None:
         user_cfilters = _get_enabled_filter_slugs(bot_id, telegram_id)
     lang = get_user_lang(bot_id, telegram_id)
     pending_notifications: List[Tuple[str, str, str, Optional[dict], bool]] = []
     pending_intervals: List[Tuple[datetime, Optional[datetime]]] = []
+    cycle_accepts: List[Tuple[datetime, Optional[datetime]]] = []  # dry-run accepts this cycle (floating)
 
     def _queue_notification(
         kind: str,
@@ -1125,8 +1165,19 @@ def _process_offers_for_user(
         # 5.5) Conflict with already accepted offers (busy intervals)
         # Skip this offer's own entries (same offer id seen on P1 and P2).
         local_busy = [iv for k, iv in local_reserved.items() if k.split(":", 1)[-1] != str(oid)]
-        effective_busy_intervals = accepted_intervals + local_busy + pending_intervals + current_cycle_intervals
-        conflict_with = _find_conflict(pickup, ends_at_iso, effective_busy_intervals)
+        # Fleet capacity mode: exact driver matching against the selected chauffeurs.
+        # pool = selected chauffeurs that are live (when the live set is unknown, trust the stored
+        # selection). If no selection, or none are live, fall back to the legacy single-slot check.
+        pool = [c for c in (operation_chauffeurs or []) if (live_drivers is None or c in live_drivers)]
+        if operation_chauffeurs and pool:
+            floating = local_busy + pending_intervals + current_cycle_intervals + cycle_accepts
+            busy_tagged = list(scheduled_tagged or []) + [(s, e, "unassigned") for (s, e) in floating]
+            conflict_with = capacity_conflict(pickup, ends_at_iso, busy_tagged, pool)
+            had_busy = bool(busy_tagged)
+        else:
+            effective_busy_intervals = accepted_intervals + local_busy + pending_intervals + current_cycle_intervals
+            conflict_with = _find_conflict(pickup, ends_at_iso, effective_busy_intervals)
+            had_busy = bool(effective_busy_intervals)
         if conflict_with:
             a_start, a_end = conflict_with
             conflict_text = t(
@@ -1136,7 +1187,7 @@ def _process_offers_for_user(
                 end=_fmt_dt_local_from_dt(a_end, tz_name),
             )
             record_result(t(lang, "f_conflict"), False, conflict_text)
-        elif effective_busy_intervals:
+        elif had_busy:
             record_result(t(lang, "f_conflict"), True, t(lang, "d_no_conflict"))
 
         # --- Final decision based on accumulated filters ---
@@ -1337,6 +1388,7 @@ def _process_offers_for_user(
                 _queue_notification("accepted", header_line, platform, reply_markup=kb)
                 if pickup is not None:
                     accepted_intervals.append((pickup, predicted_end))
+                    cycle_accepts.append((pickup, predicted_end))
 
         # Guard same-cycle overlap: mark time slot as pending even before reserve confirms
         pending_intervals.append((pickup, predicted_end))

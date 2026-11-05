@@ -32,6 +32,8 @@ from .state import (
     maybe_reset_inmem_caches,
     cleanup_not_valid_cache,
     get_rides_intervals,
+    get_rides_tagged,
+    get_live_drivers,
     get_rides_cache_age_s,
     maybe_cleanup_rides,
     get_offers_etag,
@@ -91,6 +93,7 @@ from db import (
     get_bl_account_full,
     get_mobile_headers,
     get_token_auto_refresh,
+    get_operation_chauffeurs,
 )
 
 
@@ -316,6 +319,7 @@ def poll_user(user):
         bl_uuid = runtime_cached.get("bl_uuid")
         email = runtime_cached.get("email")
         password = runtime_cached.get("password")
+        operation_chauffeurs = runtime_cached.get("operation_chauffeurs") or []
     else:
         # VPS: fetch all user config in one API call and prime the shim so
         # every getter below reads from local memory instead of the network.
@@ -332,6 +336,7 @@ def poll_user(user):
         blocked_days = {d["day"] for d in get_blocked_days(bot_id, telegram_id)}
         bl_uuid = get_bl_uuid(bot_id, telegram_id)
         email, password = _read_portal_creds(bot_id, telegram_id)
+        operation_chauffeurs = get_operation_chauffeurs(bot_id, telegram_id) or []
         set_user_runtime_cache(
             bot_id,
             telegram_id,
@@ -347,6 +352,7 @@ def poll_user(user):
                 "bl_uuid": bl_uuid,
                 "email": email,
                 "password": password,
+                "operation_chauffeurs": operation_chauffeurs,
             },
         )
 
@@ -379,6 +385,7 @@ def poll_user(user):
                     portal_email=email,
                     portal_password=password,
                     filters=filters,  # contains __endtime_formulas__ for end_dt pre-computation
+                    operation_chauffeurs=operation_chauffeurs,
                 )
                 # Cache not ready yet — skip this cycle to avoid accepting
                 # offers before the conflict filter is populated.
@@ -410,6 +417,7 @@ def poll_user(user):
                         portal_email=email,
                         portal_password=password,
                         filters=filters,  # contains __endtime_formulas__ for end_dt pre-computation
+                        operation_chauffeurs=operation_chauffeurs,
                     )
         accepted_intervals = cached_intervals or []
 
@@ -976,6 +984,9 @@ def poll_user(user):
                     p1_token=token, p1_headers=mobile_headers, p2_token=portal_token,
                     cache_version=cache_version, bl_uuid=bl_uuid, user_cfilters=user_cfilters,
                     portal_email=email, portal_password=password,
+                    operation_chauffeurs=operation_chauffeurs,
+                    scheduled_tagged=get_rides_tagged(bot_id, telegram_id),
+                    live_drivers=get_live_drivers(bot_id, telegram_id),
                 )
                 offers_p1 = []  # prevent double-processing in shared path below
 
@@ -1045,6 +1056,9 @@ def poll_user(user):
         user_cfilters=user_cfilters,
         portal_email=email,
         portal_password=password,
+        operation_chauffeurs=operation_chauffeurs,
+        scheduled_tagged=get_rides_tagged(bot_id, telegram_id),
+        live_drivers=get_live_drivers(bot_id, telegram_id),
     )
 
     return f"Done with user {telegram_id}"
